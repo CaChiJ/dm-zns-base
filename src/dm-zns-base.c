@@ -69,17 +69,6 @@ static int zns_base_map(struct dm_target *ti, struct bio *bio)
 	return DM_MAPIO_REMAPPED;
 }
 
-/* DM_TARGET_ZONED_HM is just a capability flag. Without this callback the
- * underlying device's chunk_sectors and zoned attributes never propagate up
- * to the DM queue, and blkzone fails with "unable to determine zone size". */
-static int zns_base_iterate_devices(struct dm_target *ti,
-				    iterate_devices_callout_fn fn, void *data)
-{
-	struct zns_base_c *c = ti->private;
-
-	return fn(ti, c->dev, 0, ti->len, data);
-}
-
 static struct target_type zns_base_target = {
 	.name            = "zns-base",
 	.version         = {0, 1, 0},
@@ -87,7 +76,6 @@ static struct target_type zns_base_target = {
 	.ctr             = zns_base_ctr,
 	.dtr             = zns_base_dtr,
 	.map             = zns_base_map,
-	.iterate_devices = zns_base_iterate_devices,
 };
 
 static int __init zns_base_init(void)
