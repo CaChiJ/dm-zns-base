@@ -5,10 +5,13 @@ set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 SRC_DIR=$(cd "$SCRIPT_DIR/../src" && pwd)
+ZNS_ENGINE=${ZNS_ENGINE:-${1:-append4k}}
 
-# dm-zns-base.c 빌드
-make -C "$SRC_DIR" clean
-make -C "$SRC_DIR"
+echo "[*] build engine: $ZNS_ENGINE"
+
+# dm-zns-base 모듈 빌드
+make -C "$SRC_DIR" clean ZNS_ENGINE="$ZNS_ENGINE"
+make -C "$SRC_DIR" ZNS_ENGINE="$ZNS_ENGINE"
 
 # 기존에 로드된 모듈이 있으면 내리기
 sudo dmsetup remove myzns-base 2>/dev/null || true
