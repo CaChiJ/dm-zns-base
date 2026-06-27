@@ -69,18 +69,6 @@ static int zns_base_map(struct dm_target *ti, struct bio *bio)
 	return DM_MAPIO_REMAPPED;
 }
 
-/* 1:1 mapping, so ti->begin is passed straight through. A non-identity
- * mapping would need to translate args->next_sector. */
-static int zns_base_report_zones(struct dm_target *ti,
-				 struct dm_report_zones_args *args,
-				 unsigned int nr_zones)
-{
-	struct zns_base_c *c = ti->private;
-
-	return dm_report_zones(c->dev->bdev, ti->begin,
-			       args->next_sector, args, nr_zones);
-}
-
 /* DM_TARGET_ZONED_HM is just a capability flag. Without this callback the
  * underlying device's chunk_sectors and zoned attributes never propagate up
  * to the DM queue, and blkzone fails with "unable to determine zone size". */
@@ -95,12 +83,10 @@ static int zns_base_iterate_devices(struct dm_target *ti,
 static struct target_type zns_base_target = {
 	.name            = "zns-base",
 	.version         = {0, 1, 0},
-	.features        = DM_TARGET_ZONED_HM,
 	.module          = THIS_MODULE,
 	.ctr             = zns_base_ctr,
 	.dtr             = zns_base_dtr,
 	.map             = zns_base_map,
-	.report_zones    = zns_base_report_zones,
 	.iterate_devices = zns_base_iterate_devices,
 };
 
