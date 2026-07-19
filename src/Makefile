@@ -1,7 +1,7 @@
-ZNS_ENGINE ?= append4k
+ZNS_ENGINE ?= append4k-alloc
 
 obj-m += dm-zns-base.o
-dm-zns-base-y := dm-zns-base-main.o engines/zns-engine-$(ZNS_ENGINE).o
+dm-zns-base-y := dm-zns-base-main.o zns-allocator.o engines/zns-engine-$(ZNS_ENGINE).o
 ccflags-y += -I$(src)
 
 KDIR ?= /lib/modules/$(shell uname -r)/build
