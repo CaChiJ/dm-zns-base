@@ -18,6 +18,7 @@ echo "[*] checking $UNDERLYING"
 
 build_module
 load_module
+reset_zone_zero
 create_dm_target
 
 tmp_dir=$(mktemp -d)

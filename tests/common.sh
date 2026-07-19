@@ -54,3 +54,7 @@ create_dm_target() {
 	echo "0 $sectors zns-base $UNDERLYING" | dmsetup create "$TARGET_NAME"
 	[ -b "$DM_DEV" ]
 }
+
+reset_zone_zero() {
+	blkzone reset -o 0 -c 1 "$UNDERLYING"
+}
