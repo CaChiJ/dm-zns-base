@@ -1,4 +1,4 @@
-obj-m += zns-allocator-test.o
+obj-m += allocator-test.o
 ccflags-y += -I$(src)/../src
 
 KDIR ?= /lib/modules/$(shell uname -r)/build
