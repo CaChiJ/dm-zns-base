@@ -112,6 +112,44 @@ out:
 	return ret;
 }
 
+static int memtable_test_latest_mapping(void)
+{
+	static const sector_t physical_sectors[] = { 1000, 2000, 3000 };
+	struct lsm_memtable memtable;
+	sector_t physical_sector;
+	u64 previous_sequence = 0;
+	u64 sequence;
+	unsigned int i;
+	int ret;
+
+	ret = memtable_init(&memtable);
+	if (ret)
+		return ret;
+
+	for (i = 0; i < ARRAY_SIZE(physical_sectors); i++) {
+		ret = memtable_put(&memtable, 100, physical_sectors[i]);
+		if (ret)
+			goto out;
+
+		ret = memtable_lookup(&memtable, 100, &physical_sector,
+				      &sequence);
+		if (ret)
+			goto out;
+		if (physical_sector != physical_sectors[i] ||
+		    sequence <= previous_sequence || memtable.nr_entries != 1) {
+			ret = -EINVAL;
+			goto out;
+		}
+		previous_sequence = sequence;
+	}
+
+	ret = 0;
+
+out:
+	memtable_destroy(&memtable);
+	return ret;
+}
+
 static int __init memtable_test_init(void)
 {
 	int ret;
@@ -125,6 +163,10 @@ static int __init memtable_test_init(void)
 		goto fail;
 
 	ret = memtable_test_unordered_and_duplicate();
+	if (ret)
+		goto fail;
+
+	ret = memtable_test_latest_mapping();
 	if (ret)
 		goto fail;
 

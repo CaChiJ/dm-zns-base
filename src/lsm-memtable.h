@@ -28,5 +28,7 @@ int memtable_insert(struct lsm_memtable *memtable, sector_t logical_block,
 		    sector_t physical_sector);
 int memtable_update(struct lsm_memtable *memtable, sector_t logical_block,
 		    sector_t physical_sector);
+int memtable_put(struct lsm_memtable *memtable, sector_t logical_block,
+		 sector_t physical_sector);
 
 #endif

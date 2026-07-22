@@ -150,3 +150,53 @@ int memtable_update(struct lsm_memtable *memtable, sector_t logical_block,
 
 	return ret;
 }
+
+int memtable_put(struct lsm_memtable *memtable, sector_t logical_block,
+		 sector_t physical_sector)
+{
+	struct rb_node **link;
+	struct rb_node *parent = NULL;
+	struct lsm_entry *new_entry;
+	bool inserted = false;
+
+	if (!memtable)
+		return -EINVAL;
+
+	new_entry = kmalloc(sizeof(*new_entry), GFP_KERNEL);
+	if (!new_entry)
+		return -ENOMEM;
+
+	new_entry->logical_block = logical_block;
+	new_entry->physical_sector = physical_sector;
+
+	spin_lock(&memtable->lock);
+	link = &memtable->root.rb_node;
+	while (*link) {
+		struct lsm_entry *entry;
+
+		parent = *link;
+		entry = rb_entry(parent, struct lsm_entry, node);
+		if (logical_block < entry->logical_block) {
+			link = &parent->rb_left;
+		} else if (logical_block > entry->logical_block) {
+			link = &parent->rb_right;
+		} else {
+			entry->physical_sector = physical_sector;
+			entry->sequence = memtable->next_sequence++;
+			goto unlock;
+		}
+	}
+
+	new_entry->sequence = memtable->next_sequence++;
+	rb_link_node(&new_entry->node, parent, link);
+	rb_insert_color(&new_entry->node, &memtable->root);
+	memtable->nr_entries++;
+	inserted = true;
+
+unlock:
+	spin_unlock(&memtable->lock);
+	if (!inserted)
+		kfree(new_entry);
+
+	return 0;
+}
