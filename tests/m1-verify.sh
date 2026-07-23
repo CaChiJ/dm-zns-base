@@ -36,18 +36,18 @@ trap 'rm -f "$fio_log"' EXIT
 
 errors_before=$(count_io_errors)
 
-echo "[*] verifying logical reads after random writes through $DM_DEV"
+echo "[*] writing random 4 KiB data, then verifying logical reads through $DM_DEV"
 if fio --name=m1-verify \
 		--filename="$DM_DEV" \
-		--rw=randrw \
-		--rwmixread=50 \
+		--rw=randwrite \
 		--bs=4k \
 		--size=4M \
 		--ioengine=libaio \
 		--iodepth=8 \
 		--direct=1 \
 		--verify=crc32c \
-		--verify_fatal=1 >"$fio_log" 2>&1; then
+		--verify_fatal=1 \
+		--verify_state_save=0 >"$fio_log" 2>&1; then
 	fio_status=0
 else
 	fio_status=$?
