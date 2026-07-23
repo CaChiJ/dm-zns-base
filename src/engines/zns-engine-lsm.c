@@ -17,6 +17,44 @@ struct zns_lsm {
 	sector_t sectors_per_block;
 };
 
+static bool zns_lsm_is_aligned_io(const struct zns_lsm *lsm,
+				  sector_t logical_sector,
+				  unsigned int sectors)
+{
+	return sectors == lsm->sectors_per_block &&
+	       logical_sector % lsm->sectors_per_block == 0;
+}
+
+static int zns_lsm_read(struct zns_lsm *lsm, sector_t logical_sector,
+			unsigned int sectors, sector_t *physical_sector)
+{
+	sector_t logical_block;
+
+	if (!zns_lsm_is_aligned_io(lsm, logical_sector, sectors))
+		return -EINVAL;
+
+	logical_block = logical_sector / lsm->sectors_per_block;
+	return memtable_lookup(&lsm->memtable, logical_block, physical_sector,
+			       NULL);
+}
+
+static int zns_lsm_write(struct zns_lsm *lsm, sector_t logical_sector,
+			 unsigned int sectors, sector_t *physical_sector)
+{
+	sector_t logical_block;
+	int ret;
+
+	if (!zns_lsm_is_aligned_io(lsm, logical_sector, sectors))
+		return -EINVAL;
+
+	logical_block = logical_sector / lsm->sectors_per_block;
+	ret = zns_allocator_alloc(&lsm->allocator, physical_sector);
+	if (ret)
+		return ret;
+
+	return memtable_put(&lsm->memtable, logical_block, *physical_sector);
+}
+
 int zns_engine_init(struct zns_engine *engine, struct block_device *lower_bdev,
 		    sector_t logical_sectors, sector_t physical_sectors,
 		    sector_t sectors_per_block)
@@ -74,11 +112,47 @@ void zns_engine_exit(struct zns_engine *engine)
 
 int zns_engine_map(struct zns_engine *engine, struct bio *bio)
 {
-	if (!engine || !engine->private || !bio)
+	struct zns_lsm *lsm;
+	sector_t physical_sector;
+	int ret;
+
+	if (!engine || !bio)
 		return DM_MAPIO_KILL;
 
-	/* Read and write mapping will be connected in a later milestone. */
-	return DM_MAPIO_KILL;
+	lsm = engine->private;
+	if (!lsm)
+		return DM_MAPIO_KILL;
+
+	switch (bio_op(bio)) {
+	case REQ_OP_FLUSH:
+		bio_set_dev(bio, lsm->lower_bdev);
+		return DM_MAPIO_REMAPPED;
+	case REQ_OP_READ:
+		ret = zns_lsm_read(lsm, bio->bi_iter.bi_sector,
+				   bio_sectors(bio), &physical_sector);
+		if (ret == -ENODATA) {
+			zero_fill_bio(bio);
+			bio_endio(bio);
+			return DM_MAPIO_SUBMITTED;
+		}
+		if (ret)
+			return DM_MAPIO_KILL;
+
+		bio->bi_iter.bi_sector = physical_sector;
+		bio_set_dev(bio, lsm->lower_bdev);
+		return DM_MAPIO_REMAPPED;
+	case REQ_OP_WRITE:
+		ret = zns_lsm_write(lsm, bio->bi_iter.bi_sector,
+				    bio_sectors(bio), &physical_sector);
+		if (ret)
+			return DM_MAPIO_KILL;
+
+		bio->bi_iter.bi_sector = physical_sector;
+		bio_set_dev(bio, lsm->lower_bdev);
+		return DM_MAPIO_REMAPPED;
+	default:
+		return DM_MAPIO_KILL;
+	}
 }
 
 const char *zns_engine_name(void)
