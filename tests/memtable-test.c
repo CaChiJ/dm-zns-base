@@ -147,6 +147,96 @@ out:
 	return ret;
 }
 
+static int memtable_test_active_immutable_lookup(void)
+{
+	struct lsm_memtable *active;
+	struct lsm_memtable *immutable = NULL;
+	struct lsm_memtable *null_active = NULL;
+	struct mutex table_lock;
+	sector_t physical_sector;
+	int ret;
+
+	active = memtable_create();
+	if (!active)
+		return -ENOMEM;
+	mutex_init(&table_lock);
+
+	ret = memtable_put(active, 10, 80);
+	if (ret)
+		goto out;
+	ret = memtable_put(active, 11, 88);
+	if (ret)
+		goto out;
+
+	/* Before freeze, mappings are found in active. */
+	ret = memtable_lookup_active_immutable(
+			&active, &immutable, &table_lock, 11,
+			&physical_sector);
+	if (ret || physical_sector != 88) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	ret = memtable_freeze(&active, &immutable, &table_lock);
+	if (ret)
+		goto out;
+
+	/* After freeze, the same mapping is found in immutable. */
+	ret = memtable_lookup_active_immutable(
+			&active, &immutable, &table_lock, 11,
+			&physical_sector);
+	if (ret || physical_sector != 88) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	/* A newer active mapping must shadow the immutable mapping. */
+	ret = memtable_put(active, 10, 800);
+	if (ret)
+		goto out;
+	ret = memtable_lookup_active_immutable(
+			&active, &immutable, &table_lock, 10,
+			&physical_sector);
+	if (ret || physical_sector != 800) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	ret = memtable_lookup_active_immutable(
+			&active, &immutable, &table_lock, 999,
+			&physical_sector);
+	if (ret != -ENODATA) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	if (memtable_lookup_active_immutable(
+			NULL, &immutable, &table_lock, 10,
+			&physical_sector) != -EINVAL ||
+	    memtable_lookup_active_immutable(
+			&active, NULL, &table_lock, 10,
+			&physical_sector) != -EINVAL ||
+	    memtable_lookup_active_immutable(
+			&active, &immutable, NULL, 10,
+			&physical_sector) != -EINVAL ||
+	    memtable_lookup_active_immutable(
+			&active, &immutable, &table_lock, 10, NULL) !=
+			-EINVAL ||
+	    memtable_lookup_active_immutable(
+			&null_active, &immutable, &table_lock, 10,
+			&physical_sector) != -EINVAL) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	ret = 0;
+
+out:
+	memtable_free(active);
+	memtable_free(immutable);
+	return ret;
+}
+
 static int memtable_test_threshold_freeze_concurrent(void)
 {
 	struct memtable_freeze_worker workers[FREEZE_TEST_WORKERS];
@@ -471,6 +561,10 @@ static int __init memtable_test_init(void)
 		goto fail;
 
 	ret = memtable_test_threshold_freeze();
+	if (ret)
+		goto fail;
+
+	ret = memtable_test_active_immutable_lookup();
 	if (ret)
 		goto fail;
 

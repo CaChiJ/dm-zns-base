@@ -124,6 +124,34 @@ unsigned int memtable_size(struct lsm_memtable *memtable)
 	return nr_entries;
 }
 
+int memtable_lookup_active_immutable(
+			struct lsm_memtable **active,
+			struct lsm_memtable **immutable,
+			struct mutex *table_lock,
+			sector_t logical_block,
+			sector_t *physical_sector)
+{
+	int ret;
+
+	if (!active || !immutable || !table_lock || !physical_sector)
+		return -EINVAL;
+
+	mutex_lock(table_lock);
+	if (!*active) {
+		ret = -EINVAL;
+		goto unlock;
+	}
+
+	ret = memtable_lookup(*active, logical_block, physical_sector, NULL);
+	if (ret == -ENODATA && *immutable)
+		ret = memtable_lookup(*immutable, logical_block,
+				      physical_sector, NULL);
+
+unlock:
+	mutex_unlock(table_lock);
+	return ret;
+}
+
 int memtable_put_active(struct lsm_memtable **active,
 			struct lsm_memtable **immutable,
 			struct mutex *table_lock,

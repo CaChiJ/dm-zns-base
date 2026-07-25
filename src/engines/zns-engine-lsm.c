@@ -34,6 +34,18 @@ static int __maybe_unused zns_lsm_freeze_memtable(struct zns_lsm *lsm)
 			       &lsm->table_lock);
 }
 
+static int __maybe_unused zns_lsm_lookup_mapping(
+		struct zns_lsm *lsm, sector_t logical_block,
+		sector_t *physical_sector)
+{
+	if (!lsm || !physical_sector)
+		return -EINVAL;
+
+	return memtable_lookup_active_immutable(
+			&lsm->active_memtable, &lsm->immutable_memtable,
+			&lsm->table_lock, logical_block, physical_sector);
+}
+
 static bool zns_lsm_is_aligned_io(const struct zns_lsm *lsm,
 				  sector_t logical_sector,
 				  unsigned int sectors)

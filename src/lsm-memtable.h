@@ -31,6 +31,12 @@ int memtable_freeze(struct lsm_memtable **active,
 		    struct lsm_memtable **immutable,
 		    struct mutex *table_lock);
 unsigned int memtable_size(struct lsm_memtable *memtable);
+int memtable_lookup_active_immutable(
+			struct lsm_memtable **active,
+			struct lsm_memtable **immutable,
+			struct mutex *table_lock,
+			sector_t logical_block,
+			sector_t *physical_sector);
 int memtable_put_active(struct lsm_memtable **active,
 			struct lsm_memtable **immutable,
 			struct mutex *table_lock,
