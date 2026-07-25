@@ -23,6 +23,9 @@ struct lsm_memtable {
 
 struct lsm_memtable *memtable_create(void);
 void memtable_free(struct lsm_memtable *memtable);
+int memtable_compact(const struct lsm_memtable *older,
+		     const struct lsm_memtable *newer,
+		     struct lsm_memtable **result);
 int memtable_freeze_prepared(struct lsm_memtable **active,
 			     struct lsm_memtable **immutable,
 			     struct mutex *table_lock,

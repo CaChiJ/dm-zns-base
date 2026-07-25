@@ -53,6 +53,79 @@ void memtable_free(struct lsm_memtable *memtable)
 	kfree(memtable);
 }
 
+typedef int (*memtable_compact_put_fn)(struct lsm_memtable *memtable,
+				      sector_t logical_block,
+				      sector_t physical_sector);
+
+static int memtable_compact_copy(const struct lsm_memtable *source,
+				 struct lsm_memtable *destination,
+				 memtable_compact_put_fn put)
+{
+	struct rb_node *node;
+
+	for (node = rb_first(&source->root); node; node = rb_next(node)) {
+		const struct lsm_entry *entry;
+		int ret;
+
+		entry = rb_entry(node, struct lsm_entry, node);
+		ret = put(destination, entry->logical_block,
+			  entry->physical_sector);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+
+/*
+ * The caller must keep both input tables stable for the duration of this
+ * operation. Commit 15-2 will provide that serialization with table_lock.
+ */
+static int memtable_compact_with_put(const struct lsm_memtable *older,
+				     const struct lsm_memtable *newer,
+				     struct lsm_memtable **result,
+				     memtable_compact_put_fn put)
+{
+	struct lsm_memtable *merged;
+	int ret;
+
+	if (!result)
+		return -EINVAL;
+	*result = NULL;
+	if (!older || !newer || !put)
+		return -EINVAL;
+
+	merged = memtable_create();
+	if (!merged)
+		return -ENOMEM;
+
+	ret = memtable_compact_copy(older, merged, put);
+	if (ret)
+		goto free_merged;
+
+	/*
+	 * Copy newer last. memtable_put() replaces duplicate logical blocks,
+	 * so generation order, not the per-table sequence number, wins.
+	 */
+	ret = memtable_compact_copy(newer, merged, put);
+	if (ret)
+		goto free_merged;
+
+	*result = merged;
+	return 0;
+
+free_merged:
+	memtable_free(merged);
+	return ret;
+}
+
+int memtable_compact(const struct lsm_memtable *older,
+		     const struct lsm_memtable *newer,
+		     struct lsm_memtable **result)
+{
+	return memtable_compact_with_put(older, newer, result, memtable_put);
+}
+
 static int memtable_freeze_prepared_locked(
 		struct lsm_memtable **active,
 		struct lsm_memtable **immutable,

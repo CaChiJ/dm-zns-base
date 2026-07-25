@@ -21,6 +21,20 @@ struct memtable_freeze_worker {
 	int ret;
 };
 
+static unsigned int compact_puts_before_failure;
+
+static int memtable_test_failing_compact_put(
+		struct lsm_memtable *memtable,
+		sector_t logical_block,
+		sector_t physical_sector)
+{
+	if (!compact_puts_before_failure)
+		return -ENOMEM;
+
+	compact_puts_before_failure--;
+	return memtable_put(memtable, logical_block, physical_sector);
+}
+
 static int memtable_freeze_worker_fn(void *data)
 {
 	struct memtable_freeze_worker *worker = data;
@@ -67,6 +81,184 @@ static int memtable_test_heap_lifecycle(void)
 out:
 	memtable_free(active);
 	memtable_free(immutable);
+	return ret;
+}
+
+static int memtable_test_compact_empty(void)
+{
+	struct lsm_memtable *older;
+	struct lsm_memtable *newer;
+	struct lsm_memtable *result = NULL;
+	int ret;
+
+	older = memtable_create();
+	newer = memtable_create();
+	if (!older || !newer) {
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	ret = memtable_compact(older, newer, &result);
+	if (ret)
+		goto out;
+	if (!result || memtable_size(result) != 0 ||
+	    !RB_EMPTY_ROOT(&result->root))
+		ret = -EINVAL;
+
+out:
+	memtable_free(result);
+	memtable_free(newer);
+	memtable_free(older);
+	return ret;
+}
+
+static int memtable_test_compact_mappings(void)
+{
+	static const sector_t logical_blocks[] = { 10, 20, 30, 40 };
+	static const sector_t expected[] = { 1000, 200, 300, 400 };
+	struct lsm_memtable *older;
+	struct lsm_memtable *newer;
+	struct lsm_memtable *result = NULL;
+	unsigned int older_size;
+	unsigned int newer_size;
+	unsigned int i;
+	int ret;
+
+	older = memtable_create();
+	newer = memtable_create();
+	if (!older || !newer) {
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	/* Deliberately insert out of logical-block order. */
+	ret = memtable_put(older, 40, 400);
+	if (ret)
+		goto out;
+	ret = memtable_put(older, 10, 100);
+	if (ret)
+		goto out;
+	ret = memtable_put(older, 20, 200);
+	if (ret)
+		goto out;
+
+	ret = memtable_put(newer, 30, 300);
+	if (ret)
+		goto out;
+	ret = memtable_put(newer, 10, 1000);
+	if (ret)
+		goto out;
+
+	older_size = memtable_size(older);
+	newer_size = memtable_size(newer);
+	ret = memtable_compact(older, newer, &result);
+	if (ret)
+		goto out;
+
+	if (!result || memtable_size(result) != ARRAY_SIZE(logical_blocks) ||
+	    memtable_size(older) != older_size ||
+	    memtable_size(newer) != newer_size) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	for (i = 0; i < ARRAY_SIZE(logical_blocks); i++) {
+		sector_t before;
+		sector_t after;
+
+		ret = memtable_lookup(newer, logical_blocks[i], &before, NULL);
+		if (ret == -ENODATA)
+			ret = memtable_lookup(older, logical_blocks[i],
+					      &before, NULL);
+		if (ret)
+			goto out;
+
+		ret = memtable_lookup(result, logical_blocks[i], &after, NULL);
+		if (ret || before != after || after != expected[i]) {
+			ret = -EINVAL;
+			goto out;
+		}
+	}
+
+	/* Inputs must retain their original, generation-specific values. */
+	{
+		sector_t physical_sector;
+
+		ret = memtable_lookup(older, 10, &physical_sector, NULL);
+		if (ret || physical_sector != 100) {
+			ret = -EINVAL;
+			goto out;
+		}
+		ret = memtable_lookup(newer, 10, &physical_sector, NULL);
+		if (ret || physical_sector != 1000) {
+			ret = -EINVAL;
+			goto out;
+		}
+	}
+
+	ret = 0;
+
+out:
+	memtable_free(result);
+	memtable_free(newer);
+	memtable_free(older);
+	return ret;
+}
+
+static int memtable_test_compact_errors(void)
+{
+	struct lsm_memtable *older;
+	struct lsm_memtable *newer;
+	struct lsm_memtable *result = NULL;
+	sector_t physical_sector;
+	int ret;
+
+	older = memtable_create();
+	newer = memtable_create();
+	if (!older || !newer) {
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	ret = memtable_put(older, 1, 8);
+	if (ret)
+		goto out;
+	ret = memtable_put(older, 2, 16);
+	if (ret)
+		goto out;
+
+	if (memtable_compact(NULL, newer, &result) != -EINVAL || result ||
+	    memtable_compact(older, NULL, &result) != -EINVAL || result ||
+	    memtable_compact(older, newer, NULL) != -EINVAL) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	/* Fail after one copied entry to exercise partial-result cleanup. */
+	compact_puts_before_failure = 1;
+	ret = memtable_compact_with_put(older, newer, &result,
+					 memtable_test_failing_compact_put);
+	if (ret != -ENOMEM || result) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	if (memtable_size(older) != 2 || memtable_size(newer) != 0) {
+		ret = -EINVAL;
+		goto out;
+	}
+	ret = memtable_lookup(older, 2, &physical_sector, NULL);
+	if (ret || physical_sector != 16) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	ret = 0;
+
+out:
+	memtable_free(result);
+	memtable_free(newer);
+	memtable_free(older);
 	return ret;
 }
 
@@ -557,6 +749,18 @@ static int __init memtable_test_init(void)
 	int ret;
 
 	ret = memtable_test_heap_lifecycle();
+	if (ret)
+		goto fail;
+
+	ret = memtable_test_compact_empty();
+	if (ret)
+		goto fail;
+
+	ret = memtable_test_compact_mappings();
+	if (ret)
+		goto fail;
+
+	ret = memtable_test_compact_errors();
 	if (ret)
 		goto fail;
 
