@@ -130,6 +130,11 @@ static int allocator_test_zoned_boundaries(void)
 			ret = -EINVAL;
 			goto out;
 		}
+		if ((i == 1 && allocator.active_zone != 1) ||
+		    (i == 3 && allocator.active_zone != 2)) {
+			ret = -EINVAL;
+			goto out;
+		}
 	}
 
 	ret = zns_allocator_alloc(&allocator, &sector);
@@ -173,6 +178,10 @@ static int allocator_test_zoned_partial_capacity(void)
 			ret = -EINVAL;
 			goto out;
 		}
+	}
+	if (allocator.active_zone != 1) {
+		ret = -EINVAL;
+		goto out;
 	}
 
 	ret = zns_allocator_alloc(&allocator, &sector);

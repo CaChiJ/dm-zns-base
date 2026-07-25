@@ -116,6 +116,9 @@ static int zns_allocator_alloc_zoned(struct zns_allocator *allocator,
 			    zone_end - zone->write_pointer) {
 			*physical_sector = zone->write_pointer;
 			zone->write_pointer += allocator->sectors_per_block;
+			if (allocator->sectors_per_block >
+			    zone_end - zone->write_pointer)
+				allocator->active_zone++;
 			return 0;
 		}
 
