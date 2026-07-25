@@ -32,7 +32,7 @@ static bool zns_append4k_is_aligned_io(const struct zns_append4k *m,
 }
 
 static int zns_append4k_read(struct zns_append4k *m, sector_t logical_sector,
-				 unsigned int sectors, sector_t *physical_sector)
+			     unsigned int sectors, sector_t *physical_sector)
 {
 	sector_t logical_block;
 
@@ -54,7 +54,7 @@ static int zns_append4k_read(struct zns_append4k *m, sector_t logical_sector,
 }
 
 static int zns_append4k_write(struct zns_append4k *m, sector_t logical_sector,
-				      unsigned int sectors, sector_t *physical_sector)
+			      unsigned int sectors, sector_t *physical_sector)
 {
 	sector_t logical_block;
 
@@ -139,7 +139,7 @@ int zns_engine_map(struct zns_engine *engine, struct bio *bio)
 		return DM_MAPIO_REMAPPED;
 	case REQ_OP_READ:
 		ret = zns_append4k_read(m, bio->bi_iter.bi_sector,
-					bio_sectors(bio), &physical_sector);
+					 bio_sectors(bio), &physical_sector);
 		if (ret == -ENODATA) {
 			zero_fill_bio(bio);
 			bio_endio(bio);
@@ -153,7 +153,7 @@ int zns_engine_map(struct zns_engine *engine, struct bio *bio)
 		return DM_MAPIO_REMAPPED;
 	case REQ_OP_WRITE:
 		ret = zns_append4k_write(m, bio->bi_iter.bi_sector,
-					 bio_sectors(bio), &physical_sector);
+					  bio_sectors(bio), &physical_sector);
 		if (ret)
 			return DM_MAPIO_KILL;
 
