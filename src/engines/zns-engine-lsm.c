@@ -4,6 +4,7 @@
 #include <linux/bio.h>
 #include <linux/device-mapper.h>
 #include <linux/errno.h>
+#include <linux/module.h>
 #include <linux/slab.h>
 
 #include "lsm-memtable.h"
@@ -12,6 +13,12 @@
 #include "zns-zone.h"
 
 #define ZNS_LSM_MEMTABLE_THRESHOLD 16384
+
+static unsigned int zns_lsm_memtable_threshold =
+	ZNS_LSM_MEMTABLE_THRESHOLD;
+module_param_named(memtable_threshold, zns_lsm_memtable_threshold, uint, 0444);
+MODULE_PARM_DESC(memtable_threshold,
+		 "Number of active MemTable entries that triggers a freeze");
 
 struct zns_lsm {
 	struct block_device *lower_bdev;
@@ -34,7 +41,7 @@ static int __maybe_unused zns_lsm_freeze_memtable(struct zns_lsm *lsm)
 			       &lsm->table_lock);
 }
 
-static int __maybe_unused zns_lsm_lookup_mapping(
+static int zns_lsm_lookup_mapping(
 		struct zns_lsm *lsm, sector_t logical_block,
 		sector_t *physical_sector)
 {
@@ -63,9 +70,7 @@ static int zns_lsm_read(struct zns_lsm *lsm, sector_t logical_sector,
 		return -EINVAL;
 
 	logical_block = logical_sector / lsm->sectors_per_block;
-	return memtable_lookup(lsm->active_memtable, logical_block,
-			       physical_sector,
-			       NULL);
+	return zns_lsm_lookup_mapping(lsm, logical_block, physical_sector);
 }
 
 static int zns_lsm_write(struct zns_lsm *lsm, sector_t logical_sector,
@@ -97,6 +102,7 @@ int zns_engine_init(struct zns_engine *engine, struct block_device *lower_bdev,
 	int ret;
 
 	if (!engine || !lower_bdev || !sectors_per_block ||
+	    !zns_lsm_memtable_threshold ||
 	    logical_sectors % sectors_per_block ||
 	    physical_sectors % sectors_per_block)
 		return -EINVAL;
@@ -107,7 +113,7 @@ int zns_engine_init(struct zns_engine *engine, struct block_device *lower_bdev,
 
 	lsm->lower_bdev = lower_bdev;
 	lsm->sectors_per_block = sectors_per_block;
-	lsm->memtable_threshold = ZNS_LSM_MEMTABLE_THRESHOLD;
+	lsm->memtable_threshold = zns_lsm_memtable_threshold;
 	mutex_init(&lsm->table_lock);
 
 	ret = zns_zone_table_init(&lsm->zone_table, lower_bdev);
