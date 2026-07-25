@@ -56,6 +56,10 @@ void memtable_free(struct lsm_memtable *memtable)
 typedef int (*memtable_compact_put_fn)(struct lsm_memtable *memtable,
 				      sector_t logical_block,
 				      sector_t physical_sector);
+typedef int (*memtable_compact_fn)(const struct lsm_memtable *older,
+				   const struct lsm_memtable *newer,
+				   struct lsm_memtable **result);
+typedef struct lsm_memtable *(*memtable_create_fn)(void);
 
 static int memtable_compact_copy(const struct lsm_memtable *source,
 				 struct lsm_memtable *destination,
@@ -225,17 +229,24 @@ unlock:
 	return ret;
 }
 
-int memtable_put_active(struct lsm_memtable **active,
+static int memtable_put_active_with_ops(
+			struct lsm_memtable **active,
 			struct lsm_memtable **immutable,
 			struct mutex *table_lock,
 			unsigned int threshold,
 			sector_t logical_block,
-			sector_t physical_sector)
+			sector_t physical_sector,
+			memtable_compact_fn compact,
+			memtable_create_fn create)
 {
-	struct lsm_memtable *new_active;
+	struct lsm_memtable *old_active = NULL;
+	struct lsm_memtable *old_immutable = NULL;
+	struct lsm_memtable *new_active = NULL;
+	struct lsm_memtable *merged = NULL;
 	int ret;
 
-	if (!active || !immutable || !table_lock || !threshold)
+	if (!active || !immutable || !table_lock || !threshold ||
+	    !compact || !create)
 		return -EINVAL;
 
 	mutex_lock(table_lock);
@@ -248,26 +259,69 @@ int memtable_put_active(struct lsm_memtable **active,
 	if (ret)
 		goto unlock;
 
-	if (memtable_size(*active) < threshold || *immutable)
+	if (memtable_size(*active) < threshold)
 		goto unlock;
 
-	new_active = memtable_create();
-	if (!new_active)
-		goto unlock;
+	if (!*immutable) {
+		new_active = create();
+		if (!new_active)
+			goto preserve_write;
 
-	ret = memtable_freeze_prepared_locked(active, immutable, new_active);
-	if (ret) {
-		memtable_free(new_active);
-		/*
-		 * The mapping was already stored successfully. Freeze failure
-		 * must not turn the completed write into an I/O error.
-		 */
-		ret = 0;
+		ret = memtable_freeze_prepared_locked(active, immutable,
+						      new_active);
+		if (ret) {
+			memtable_free(new_active);
+			goto preserve_write;
+		}
+		goto unlock;
 	}
 
+	ret = compact(*immutable, *active, &merged);
+	if (ret)
+		goto preserve_write;
+
+	new_active = create();
+	if (!new_active) {
+		memtable_free(merged);
+		goto preserve_write;
+	}
+
+	/*
+	 * Both replacement tables are complete. Publish them together while
+	 * table_lock excludes lookups and writers, then reclaim the detached
+	 * generations after releasing the state lock.
+	 */
+	old_active = *active;
+	old_immutable = *immutable;
+	*active = new_active;
+	*immutable = merged;
+	goto unlock;
+
+preserve_write:
+	/*
+	 * The mapping was stored before maintenance began. A freeze or
+	 * compaction failure must not turn that completed write into an I/O
+	 * error; keeping both pointers also makes the next write retry.
+	 */
+	ret = 0;
 unlock:
 	mutex_unlock(table_lock);
+	memtable_free(old_active);
+	memtable_free(old_immutable);
 	return ret;
+}
+
+int memtable_put_active(struct lsm_memtable **active,
+			struct lsm_memtable **immutable,
+			struct mutex *table_lock,
+			unsigned int threshold,
+			sector_t logical_block,
+			sector_t physical_sector)
+{
+	return memtable_put_active_with_ops(active, immutable, table_lock,
+					    threshold, logical_block,
+					    physical_sector, memtable_compact,
+					    memtable_create);
 }
 
 int memtable_init(struct lsm_memtable *memtable)

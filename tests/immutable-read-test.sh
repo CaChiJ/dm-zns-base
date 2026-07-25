@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Verify LSM reads across active and immutable MemTable generations.
+# Verify LSM reads across freeze and repeated synchronous compaction.
 
 set -euo pipefail
 
@@ -90,6 +90,8 @@ dd if=/dev/urandom of="$tmp_dir/a.bin" bs=4096 count=1 status=none
 dd if=/dev/urandom of="$tmp_dir/b.bin" bs=4096 count=1 status=none
 dd if=/dev/urandom of="$tmp_dir/c.bin" bs=4096 count=1 status=none
 dd if=/dev/urandom of="$tmp_dir/d.bin" bs=4096 count=1 status=none
+dd if=/dev/urandom of="$tmp_dir/e.bin" bs=4096 count=1 status=none
+dd if=/dev/urandom of="$tmp_dir/f.bin" bs=4096 count=1 status=none
 dd if=/dev/zero of="$tmp_dir/zero.bin" bs=4096 count=1 status=none
 
 errors_before=$(count_io_errors)
@@ -109,8 +111,20 @@ echo "[*] overwriting an immutable mapping in active"
 write_block "$tmp_dir/d.bin" 10
 assert_block "$tmp_dir/d.bin" 10 latest
 
+echo "[*] verifying mappings after the first compaction"
+assert_block "$tmp_dir/b.bin" 20 compacted-old
+assert_block "$tmp_dir/c.bin" 30 compacted-new
+
+echo "[*] triggering and verifying repeated compaction"
+write_block "$tmp_dir/e.bin" 40
+assert_block "$tmp_dir/e.bin" 40 repeat-active
+write_block "$tmp_dir/f.bin" 50
+assert_block "$tmp_dir/d.bin" 10 repeat-latest
+assert_block "$tmp_dir/e.bin" 40 repeat-first
+assert_block "$tmp_dir/f.bin" 50 repeat-second
+
 echo "[*] checking zero-fill for an unmapped logical block"
-assert_block "$tmp_dir/zero.bin" 40 unmapped
+assert_block "$tmp_dir/zero.bin" 60 unmapped
 
 errors_after=$(count_io_errors)
 [ "$errors_after" -eq "$errors_before" ] || {
@@ -118,4 +132,4 @@ errors_after=$(count_io_errors)
 	exit 1
 }
 
-echo "Active/immutable LSM read test: PASS"
+echo "Synchronous MemTable compaction read test: PASS"

@@ -23,6 +23,22 @@ struct memtable_freeze_worker {
 
 static unsigned int compact_puts_before_failure;
 
+static int memtable_test_failing_compact(
+		const struct lsm_memtable *older,
+		const struct lsm_memtable *newer,
+		struct lsm_memtable **result)
+{
+	(void)older;
+	(void)newer;
+	*result = NULL;
+	return -ENOMEM;
+}
+
+static struct lsm_memtable *memtable_test_failing_create(void)
+{
+	return NULL;
+}
+
 static int memtable_test_failing_compact_put(
 		struct lsm_memtable *memtable,
 		sector_t logical_block,
@@ -268,6 +284,7 @@ static int memtable_test_threshold_freeze(void)
 	struct lsm_memtable *immutable = NULL;
 	struct lsm_memtable *old_active;
 	struct lsm_memtable *active_after_freeze;
+	struct lsm_memtable *immutable_after_compaction;
 	struct mutex table_lock;
 	sector_t physical_sector;
 	int ret;
@@ -319,20 +336,106 @@ static int memtable_test_threshold_freeze(void)
 		goto out;
 	}
 
-	/*
-	 * Once immutable exists, reaching the threshold again keeps accepting
-	 * writes in the same active table until a flush path is implemented.
-	 */
 	active_after_freeze = active;
-	ret = memtable_put_active(&active, &immutable, &table_lock, 2, 13, 112);
-	if (ret || active != active_after_freeze ||
-	    immutable != old_active || memtable_size(active) != 2) {
+	ret = memtable_put_active(&active, &immutable, &table_lock, 2, 10, 112);
+	if (ret || active == active_after_freeze ||
+	    immutable == old_active || memtable_size(active) != 0 ||
+	    memtable_size(immutable) != 3) {
 		ret = -EINVAL;
 		goto out;
 	}
 
-	ret = 0;
+	ret = memtable_lookup(immutable, 10, &physical_sector, NULL);
+	if (ret || physical_sector != 112)
+		goto invalid;
+	ret = memtable_lookup(immutable, 12, &physical_sector, NULL);
+	if (ret || physical_sector != 104)
+		goto invalid;
 
+	/* A later threshold must compact the generations again. */
+	immutable_after_compaction = immutable;
+	ret = memtable_put_active(&active, &immutable, &table_lock, 2, 14, 120);
+	if (ret)
+		goto out;
+	ret = memtable_put_active(&active, &immutable, &table_lock, 2, 15, 128);
+	if (ret || immutable == immutable_after_compaction ||
+	    memtable_size(active) != 0 || memtable_size(immutable) != 5)
+		goto invalid;
+
+	ret = memtable_put_active(&active, &immutable, &table_lock, 2, 16, 136);
+	if (ret)
+		goto out;
+	ret = memtable_lookup(active, 16, &physical_sector, NULL);
+	if (ret || physical_sector != 136)
+		goto invalid;
+
+	ret = 0;
+	goto out;
+
+invalid:
+	ret = -EINVAL;
+
+out:
+	memtable_free(active);
+	memtable_free(immutable);
+	return ret;
+}
+
+static int memtable_test_threshold_compaction_failures(void)
+{
+	struct lsm_memtable *active;
+	struct lsm_memtable *immutable;
+	struct lsm_memtable *old_active;
+	struct lsm_memtable *old_immutable;
+	struct mutex table_lock;
+	sector_t physical_sector;
+	int ret;
+
+	active = memtable_create();
+	immutable = memtable_create();
+	if (!active || !immutable) {
+		ret = -ENOMEM;
+		goto out;
+	}
+	mutex_init(&table_lock);
+
+	ret = memtable_put(immutable, 1, 8);
+	if (ret)
+		goto out;
+	ret = memtable_put(active, 2, 16);
+	if (ret)
+		goto out;
+	old_active = active;
+	old_immutable = immutable;
+
+	ret = memtable_put_active_with_ops(
+			&active, &immutable, &table_lock, 2, 3, 24,
+			memtable_test_failing_compact, memtable_create);
+	if (ret || active != old_active || immutable != old_immutable)
+		goto invalid;
+	ret = memtable_lookup(active, 3, &physical_sector, NULL);
+	if (ret || physical_sector != 24)
+		goto invalid;
+
+	/*
+	 * Let merge succeed but fail creation of the replacement active.
+	 * The temporary merged table must be discarded without publication.
+	 */
+	ret = memtable_put_active_with_ops(
+			&active, &immutable, &table_lock, 2, 4, 32,
+			memtable_compact, memtable_test_failing_create);
+	if (ret || active != old_active || immutable != old_immutable)
+		goto invalid;
+	ret = memtable_lookup_active_immutable(
+			&active, &immutable, &table_lock, 4, &physical_sector);
+	if (ret || physical_sector != 32)
+		goto invalid;
+
+	ret = 0;
+	goto out;
+
+invalid:
+	ret = -EINVAL;
 out:
 	memtable_free(active);
 	memtable_free(immutable);
@@ -473,9 +576,8 @@ static int memtable_test_threshold_freeze_concurrent(void)
 		}
 	}
 
-	if (!active || !immutable ||
-	    memtable_size(immutable) != FREEZE_TEST_THRESHOLD ||
-	    memtable_size(active) + memtable_size(immutable) !=
+	if (!active || !immutable || memtable_size(active) != 0 ||
+	    memtable_size(immutable) !=
 		    FREEZE_TEST_WORKERS * FREEZE_TEST_PUTS_PER_WORKER) {
 		ret = -EINVAL;
 		goto out;
@@ -765,6 +867,10 @@ static int __init memtable_test_init(void)
 		goto fail;
 
 	ret = memtable_test_threshold_freeze();
+	if (ret)
+		goto fail;
+
+	ret = memtable_test_threshold_compaction_failures();
 	if (ret)
 		goto fail;
 
