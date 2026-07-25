@@ -13,6 +13,7 @@ struct zns_zone {
 	sector_t length;
 	sector_t capacity;
 	sector_t write_pointer;
+	u8 condition;
 	bool active;
 };
 

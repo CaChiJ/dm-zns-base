@@ -32,6 +32,7 @@ static int zns_zone_report_cb(struct blk_zone *reported,
 	zone->length = reported->len;
 	zone->capacity = reported->capacity;
 	zone->write_pointer = reported->wp;
+	zone->condition = reported->cond;
 	zone->active = zns_zone_is_active(reported->cond);
 
 	return 0;

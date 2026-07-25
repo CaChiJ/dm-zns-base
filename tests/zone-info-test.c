@@ -62,11 +62,12 @@ static int __init zone_info_test_init(void)
 
 	zone = &table.zones[0];
 	pr_info("zns zone info test: zones=%u\n", table.nr_zones);
-	pr_info("zns zone info test: zone0 start=%llu len=%llu capacity=%llu wp=%llu active=%u\n",
+	pr_info("zns zone info test: zone0 start=%llu len=%llu capacity=%llu wp=%llu condition=0x%x active=%u\n",
 		(unsigned long long)zone->start_sector,
 		(unsigned long long)zone->length,
 		(unsigned long long)zone->capacity,
 		(unsigned long long)zone->write_pointer,
+		zone->condition,
 		zone->active);
 
 out_destroy:
