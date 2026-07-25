@@ -53,6 +53,54 @@ void memtable_free(struct lsm_memtable *memtable)
 	kfree(memtable);
 }
 
+int memtable_freeze_prepared(struct lsm_memtable **active,
+			     struct lsm_memtable **immutable,
+			     spinlock_t *table_lock,
+			     struct lsm_memtable *new_active)
+{
+	int ret = 0;
+
+	if (!active || !immutable || !table_lock)
+		return -EINVAL;
+	if (!new_active)
+		return -ENOMEM;
+
+	spin_lock(table_lock);
+	if (!*active) {
+		ret = -EINVAL;
+	} else if (*immutable) {
+		ret = -EBUSY;
+	} else {
+		*immutable = *active;
+		*active = new_active;
+	}
+	spin_unlock(table_lock);
+
+	return ret;
+}
+
+int memtable_freeze(struct lsm_memtable **active,
+		    struct lsm_memtable **immutable,
+		    spinlock_t *table_lock)
+{
+	struct lsm_memtable *new_active;
+	int ret;
+
+	if (!active || !immutable || !table_lock)
+		return -EINVAL;
+
+	new_active = memtable_create();
+	if (!new_active)
+		return -ENOMEM;
+
+	ret = memtable_freeze_prepared(active, immutable, table_lock,
+				       new_active);
+	if (ret)
+		memtable_free(new_active);
+
+	return ret;
+}
+
 int memtable_init(struct lsm_memtable *memtable)
 {
 	if (!memtable)

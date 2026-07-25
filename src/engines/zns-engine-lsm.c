@@ -24,6 +24,16 @@ struct zns_lsm {
 	sector_t sectors_per_block;
 };
 
+static int __maybe_unused zns_lsm_freeze_memtable(struct zns_lsm *lsm)
+{
+	if (!lsm)
+		return -EINVAL;
+
+	return memtable_freeze(&lsm->active_memtable,
+			       &lsm->immutable_memtable,
+			       &lsm->table_lock);
+}
+
 static bool zns_lsm_is_aligned_io(const struct zns_lsm *lsm,
 				  sector_t logical_sector,
 				  unsigned int sectors)

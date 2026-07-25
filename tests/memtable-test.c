@@ -35,6 +35,103 @@ out:
 	return ret;
 }
 
+static int memtable_test_freeze(void)
+{
+	struct lsm_memtable *active;
+	struct lsm_memtable *immutable = NULL;
+	struct lsm_memtable *old_active;
+	struct lsm_memtable *active_after_freeze;
+	spinlock_t table_lock;
+	sector_t physical_sector;
+	int ret;
+
+	active = memtable_create();
+	if (!active)
+		return -ENOMEM;
+	spin_lock_init(&table_lock);
+
+	ret = memtable_put(active, 7, 56);
+	if (ret)
+		goto out;
+
+	old_active = active;
+	ret = memtable_freeze(&active, &immutable, &table_lock);
+	if (ret)
+		goto out;
+	if (immutable != old_active || active == old_active ||
+	    !RB_EMPTY_ROOT(&active->root) || active->nr_entries) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	ret = memtable_lookup(immutable, 7, &physical_sector, NULL);
+	if (ret || physical_sector != 56) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	ret = memtable_put(active, 8, 64);
+	if (ret)
+		goto out;
+	ret = memtable_lookup(active, 8, &physical_sector, NULL);
+	if (ret || physical_sector != 64) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	active_after_freeze = active;
+	ret = memtable_freeze(&active, &immutable, &table_lock);
+	if (ret != -EBUSY || active != active_after_freeze ||
+	    immutable != old_active) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	ret = 0;
+
+out:
+	memtable_free(active);
+	memtable_free(immutable);
+	return ret;
+}
+
+static int memtable_test_freeze_allocation_failure(void)
+{
+	struct lsm_memtable *active;
+	struct lsm_memtable *immutable = NULL;
+	struct lsm_memtable *old_active;
+	spinlock_t table_lock;
+	sector_t physical_sector;
+	int ret;
+
+	active = memtable_create();
+	if (!active)
+		return -ENOMEM;
+	spin_lock_init(&table_lock);
+
+	ret = memtable_put(active, 9, 72);
+	if (ret)
+		goto out;
+
+	old_active = active;
+	ret = memtable_freeze_prepared(&active, &immutable, &table_lock, NULL);
+	if (ret != -ENOMEM || active != old_active || immutable) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	ret = memtable_lookup(active, 9, &physical_sector, NULL);
+	if (ret || physical_sector != 72)
+		ret = -EINVAL;
+	else
+		ret = 0;
+
+out:
+	memtable_free(active);
+	memtable_free(immutable);
+	return ret;
+}
+
 static int memtable_test_insert_lookup_update(void)
 {
 	struct lsm_memtable memtable;
@@ -184,6 +281,14 @@ static int __init memtable_test_init(void)
 	int ret;
 
 	ret = memtable_test_heap_lifecycle();
+	if (ret)
+		goto fail;
+
+	ret = memtable_test_freeze();
+	if (ret)
+		goto fail;
+
+	ret = memtable_test_freeze_allocation_failure();
 	if (ret)
 		goto fail;
 
