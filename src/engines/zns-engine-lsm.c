@@ -9,9 +9,11 @@
 #include "lsm-memtable.h"
 #include "zns-allocator.h"
 #include "zns-engine.h"
+#include "zns-zone.h"
 
 struct zns_lsm {
 	struct block_device *lower_bdev;
+	struct zns_zone_table zone_table;
 	struct zns_allocator allocator;
 	struct lsm_memtable memtable;
 	sector_t sectors_per_block;
@@ -74,10 +76,16 @@ int zns_engine_init(struct zns_engine *engine, struct block_device *lower_bdev,
 	lsm->lower_bdev = lower_bdev;
 	lsm->sectors_per_block = sectors_per_block;
 
-	ret = zns_allocator_init(&lsm->allocator, physical_sectors,
-				 sectors_per_block);
+	ret = zns_zone_table_init(&lsm->zone_table, lower_bdev);
 	if (ret)
 		goto free_lsm;
+
+	ret = zns_allocator_init_zoned(&lsm->allocator,
+				       lsm->zone_table.zones,
+				       lsm->zone_table.nr_zones,
+				       sectors_per_block);
+	if (ret)
+		goto destroy_zone_table;
 
 	ret = memtable_init(&lsm->memtable);
 	if (ret)
@@ -88,6 +96,8 @@ int zns_engine_init(struct zns_engine *engine, struct block_device *lower_bdev,
 
 exit_allocator:
 	zns_allocator_exit(&lsm->allocator);
+destroy_zone_table:
+	zns_zone_table_destroy(&lsm->zone_table);
 free_lsm:
 	kfree(lsm);
 	return ret;
@@ -106,6 +116,7 @@ void zns_engine_exit(struct zns_engine *engine)
 
 	memtable_destroy(&lsm->memtable);
 	zns_allocator_exit(&lsm->allocator);
+	zns_zone_table_destroy(&lsm->zone_table);
 	kfree(lsm);
 	engine->private = NULL;
 }
