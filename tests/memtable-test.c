@@ -1,10 +1,45 @@
 // SPDX-License-Identifier: GPL-2.0
 /* Standalone kernel-module tests for the in-memory memtable. */
 
+#include <linux/completion.h>
 #include <linux/errno.h>
+#include <linux/kthread.h>
 #include <linux/module.h>
 
 #include "../src/lsm-memtable.c"
+
+#define FREEZE_TEST_THRESHOLD 32
+#define FREEZE_TEST_WORKERS 2
+#define FREEZE_TEST_PUTS_PER_WORKER 32
+
+struct memtable_freeze_worker {
+	struct lsm_memtable **active;
+	struct lsm_memtable **immutable;
+	struct mutex *table_lock;
+	unsigned int start;
+	struct completion done;
+	int ret;
+};
+
+static int memtable_freeze_worker_fn(void *data)
+{
+	struct memtable_freeze_worker *worker = data;
+	unsigned int i;
+
+	for (i = 0; i < FREEZE_TEST_PUTS_PER_WORKER; i++) {
+		sector_t logical_block = worker->start + i;
+
+		worker->ret = memtable_put_active(
+				worker->active, worker->immutable,
+				worker->table_lock, FREEZE_TEST_THRESHOLD,
+				logical_block, logical_block * 8);
+		if (worker->ret)
+			break;
+	}
+
+	complete(&worker->done);
+	return 0;
+}
 
 static int memtable_test_heap_lifecycle(void)
 {
@@ -35,20 +70,171 @@ out:
 	return ret;
 }
 
-static int memtable_test_freeze(void)
+static int memtable_test_threshold_freeze(void)
 {
 	struct lsm_memtable *active;
 	struct lsm_memtable *immutable = NULL;
 	struct lsm_memtable *old_active;
 	struct lsm_memtable *active_after_freeze;
-	spinlock_t table_lock;
+	struct mutex table_lock;
 	sector_t physical_sector;
 	int ret;
 
 	active = memtable_create();
 	if (!active)
 		return -ENOMEM;
-	spin_lock_init(&table_lock);
+	mutex_init(&table_lock);
+	old_active = active;
+
+	ret = memtable_put_active(&active, &immutable, &table_lock, 2, 10, 80);
+	if (ret)
+		goto out;
+	if (active != old_active || immutable || memtable_size(active) != 1) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	/* Updating an existing key must not advance the entry threshold. */
+	ret = memtable_put_active(&active, &immutable, &table_lock, 2, 10, 88);
+	if (ret)
+		goto out;
+	if (active != old_active || immutable || memtable_size(active) != 1) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	ret = memtable_put_active(&active, &immutable, &table_lock, 2, 11, 96);
+	if (ret)
+		goto out;
+	if (immutable != old_active || active == old_active ||
+	    memtable_size(immutable) != 2 || memtable_size(active) != 0) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	ret = memtable_lookup(immutable, 11, &physical_sector, NULL);
+	if (ret || physical_sector != 96) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	ret = memtable_put_active(&active, &immutable, &table_lock, 2, 12, 104);
+	if (ret)
+		goto out;
+	ret = memtable_lookup(active, 12, &physical_sector, NULL);
+	if (ret || physical_sector != 104) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	/*
+	 * Once immutable exists, reaching the threshold again keeps accepting
+	 * writes in the same active table until a flush path is implemented.
+	 */
+	active_after_freeze = active;
+	ret = memtable_put_active(&active, &immutable, &table_lock, 2, 13, 112);
+	if (ret || active != active_after_freeze ||
+	    immutable != old_active || memtable_size(active) != 2) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	ret = 0;
+
+out:
+	memtable_free(active);
+	memtable_free(immutable);
+	return ret;
+}
+
+static int memtable_test_threshold_freeze_concurrent(void)
+{
+	struct memtable_freeze_worker workers[FREEZE_TEST_WORKERS];
+	struct task_struct *tasks[FREEZE_TEST_WORKERS];
+	struct lsm_memtable *active;
+	struct lsm_memtable *immutable = NULL;
+	struct mutex table_lock;
+	unsigned int i;
+	int ret;
+
+	active = memtable_create();
+	if (!active)
+		return -ENOMEM;
+	mutex_init(&table_lock);
+
+	for (i = 0; i < FREEZE_TEST_WORKERS; i++) {
+		workers[i].active = &active;
+		workers[i].immutable = &immutable;
+		workers[i].table_lock = &table_lock;
+		workers[i].start = i * FREEZE_TEST_PUTS_PER_WORKER;
+		workers[i].ret = 0;
+		init_completion(&workers[i].done);
+		tasks[i] = kthread_run(memtable_freeze_worker_fn, &workers[i],
+				     "zns-freeze-%u", i);
+		if (IS_ERR(tasks[i])) {
+			ret = PTR_ERR(tasks[i]);
+			while (i-- > 0) {
+				kthread_stop(tasks[i]);
+				wait_for_completion(&workers[i].done);
+			}
+			goto out;
+		}
+	}
+
+	for (i = 0; i < FREEZE_TEST_WORKERS; i++)
+		wait_for_completion(&workers[i].done);
+
+	for (i = 0; i < FREEZE_TEST_WORKERS; i++) {
+		if (workers[i].ret) {
+			ret = workers[i].ret;
+			goto out;
+		}
+	}
+
+	if (!active || !immutable ||
+	    memtable_size(immutable) != FREEZE_TEST_THRESHOLD ||
+	    memtable_size(active) + memtable_size(immutable) !=
+		    FREEZE_TEST_WORKERS * FREEZE_TEST_PUTS_PER_WORKER) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	for (i = 0;
+	     i < FREEZE_TEST_WORKERS * FREEZE_TEST_PUTS_PER_WORKER; i++) {
+		sector_t physical_sector;
+
+		ret = memtable_lookup(active, i, &physical_sector, NULL);
+		if (ret == -ENODATA)
+			ret = memtable_lookup(immutable, i, &physical_sector,
+					      NULL);
+		if (ret || physical_sector != i * 8) {
+			ret = -EINVAL;
+			goto out;
+		}
+	}
+
+	ret = 0;
+
+out:
+	memtable_free(active);
+	memtable_free(immutable);
+	return ret;
+}
+
+static int memtable_test_freeze(void)
+{
+	struct lsm_memtable *active;
+	struct lsm_memtable *immutable = NULL;
+	struct lsm_memtable *old_active;
+	struct lsm_memtable *active_after_freeze;
+	struct mutex table_lock;
+	sector_t physical_sector;
+	int ret;
+
+	active = memtable_create();
+	if (!active)
+		return -ENOMEM;
+	mutex_init(&table_lock);
 
 	ret = memtable_put(active, 7, 56);
 	if (ret)
@@ -100,14 +286,14 @@ static int memtable_test_freeze_allocation_failure(void)
 	struct lsm_memtable *active;
 	struct lsm_memtable *immutable = NULL;
 	struct lsm_memtable *old_active;
-	spinlock_t table_lock;
+	struct mutex table_lock;
 	sector_t physical_sector;
 	int ret;
 
 	active = memtable_create();
 	if (!active)
 		return -ENOMEM;
-	spin_lock_init(&table_lock);
+	mutex_init(&table_lock);
 
 	ret = memtable_put(active, 9, 72);
 	if (ret)
@@ -281,6 +467,14 @@ static int __init memtable_test_init(void)
 	int ret;
 
 	ret = memtable_test_heap_lifecycle();
+	if (ret)
+		goto fail;
+
+	ret = memtable_test_threshold_freeze();
+	if (ret)
+		goto fail;
+
+	ret = memtable_test_threshold_freeze_concurrent();
 	if (ret)
 		goto fail;
 

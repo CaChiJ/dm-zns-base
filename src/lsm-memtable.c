@@ -53,35 +53,44 @@ void memtable_free(struct lsm_memtable *memtable)
 	kfree(memtable);
 }
 
+static int memtable_freeze_prepared_locked(
+		struct lsm_memtable **active,
+		struct lsm_memtable **immutable,
+		struct lsm_memtable *new_active)
+{
+	if (!new_active)
+		return -ENOMEM;
+	if (!*active) {
+		return -EINVAL;
+	}
+	if (*immutable)
+		return -EBUSY;
+
+	*immutable = *active;
+	*active = new_active;
+	return 0;
+}
+
 int memtable_freeze_prepared(struct lsm_memtable **active,
 			     struct lsm_memtable **immutable,
-			     spinlock_t *table_lock,
+			     struct mutex *table_lock,
 			     struct lsm_memtable *new_active)
 {
-	int ret = 0;
+	int ret;
 
 	if (!active || !immutable || !table_lock)
 		return -EINVAL;
-	if (!new_active)
-		return -ENOMEM;
 
-	spin_lock(table_lock);
-	if (!*active) {
-		ret = -EINVAL;
-	} else if (*immutable) {
-		ret = -EBUSY;
-	} else {
-		*immutable = *active;
-		*active = new_active;
-	}
-	spin_unlock(table_lock);
+	mutex_lock(table_lock);
+	ret = memtable_freeze_prepared_locked(active, immutable, new_active);
+	mutex_unlock(table_lock);
 
 	return ret;
 }
 
 int memtable_freeze(struct lsm_memtable **active,
 		    struct lsm_memtable **immutable,
-		    spinlock_t *table_lock)
+		    struct mutex *table_lock)
 {
 	struct lsm_memtable *new_active;
 	int ret;
@@ -98,6 +107,65 @@ int memtable_freeze(struct lsm_memtable **active,
 	if (ret)
 		memtable_free(new_active);
 
+	return ret;
+}
+
+unsigned int memtable_size(struct lsm_memtable *memtable)
+{
+	unsigned int nr_entries;
+
+	if (!memtable)
+		return 0;
+
+	spin_lock(&memtable->lock);
+	nr_entries = memtable->nr_entries;
+	spin_unlock(&memtable->lock);
+
+	return nr_entries;
+}
+
+int memtable_put_active(struct lsm_memtable **active,
+			struct lsm_memtable **immutable,
+			struct mutex *table_lock,
+			unsigned int threshold,
+			sector_t logical_block,
+			sector_t physical_sector)
+{
+	struct lsm_memtable *new_active;
+	int ret;
+
+	if (!active || !immutable || !table_lock || !threshold)
+		return -EINVAL;
+
+	mutex_lock(table_lock);
+	if (!*active) {
+		ret = -EINVAL;
+		goto unlock;
+	}
+
+	ret = memtable_put(*active, logical_block, physical_sector);
+	if (ret)
+		goto unlock;
+
+	if (memtable_size(*active) < threshold || *immutable)
+		goto unlock;
+
+	new_active = memtable_create();
+	if (!new_active)
+		goto unlock;
+
+	ret = memtable_freeze_prepared_locked(active, immutable, new_active);
+	if (ret) {
+		memtable_free(new_active);
+		/*
+		 * The mapping was already stored successfully. Freeze failure
+		 * must not turn the completed write into an I/O error.
+		 */
+		ret = 0;
+	}
+
+unlock:
+	mutex_unlock(table_lock);
 	return ret;
 }
 

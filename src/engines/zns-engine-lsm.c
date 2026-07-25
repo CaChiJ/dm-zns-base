@@ -19,7 +19,7 @@ struct zns_lsm {
 	struct zns_allocator allocator;
 	struct lsm_memtable *active_memtable;
 	struct lsm_memtable *immutable_memtable;
-	spinlock_t table_lock;
+	struct mutex table_lock;
 	unsigned int memtable_threshold;
 	sector_t sectors_per_block;
 };
@@ -70,8 +70,11 @@ static int zns_lsm_write(struct zns_lsm *lsm, sector_t logical_sector,
 	if (ret)
 		return ret;
 
-	return memtable_put(lsm->active_memtable, logical_block,
-			    *physical_sector);
+	return memtable_put_active(&lsm->active_memtable,
+				   &lsm->immutable_memtable,
+				   &lsm->table_lock,
+				   lsm->memtable_threshold,
+				   logical_block, *physical_sector);
 }
 
 int zns_engine_init(struct zns_engine *engine, struct block_device *lower_bdev,
@@ -93,7 +96,7 @@ int zns_engine_init(struct zns_engine *engine, struct block_device *lower_bdev,
 	lsm->lower_bdev = lower_bdev;
 	lsm->sectors_per_block = sectors_per_block;
 	lsm->memtable_threshold = ZNS_LSM_MEMTABLE_THRESHOLD;
-	spin_lock_init(&lsm->table_lock);
+	mutex_init(&lsm->table_lock);
 
 	ret = zns_zone_table_init(&lsm->zone_table, lower_bdev);
 	if (ret)

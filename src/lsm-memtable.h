@@ -2,6 +2,7 @@
 #ifndef _LSM_MEMTABLE_H
 #define _LSM_MEMTABLE_H
 
+#include <linux/mutex.h>
 #include <linux/rbtree.h>
 #include <linux/spinlock.h>
 #include <linux/types.h>
@@ -24,11 +25,18 @@ struct lsm_memtable *memtable_create(void);
 void memtable_free(struct lsm_memtable *memtable);
 int memtable_freeze_prepared(struct lsm_memtable **active,
 			     struct lsm_memtable **immutable,
-			     spinlock_t *table_lock,
+			     struct mutex *table_lock,
 			     struct lsm_memtable *new_active);
 int memtable_freeze(struct lsm_memtable **active,
 		    struct lsm_memtable **immutable,
-		    spinlock_t *table_lock);
+		    struct mutex *table_lock);
+unsigned int memtable_size(struct lsm_memtable *memtable);
+int memtable_put_active(struct lsm_memtable **active,
+			struct lsm_memtable **immutable,
+			struct mutex *table_lock,
+			unsigned int threshold,
+			sector_t logical_block,
+			sector_t physical_sector);
 int memtable_init(struct lsm_memtable *memtable);
 void memtable_destroy(struct lsm_memtable *memtable);
 int memtable_lookup(struct lsm_memtable *memtable, sector_t logical_block,
