@@ -20,6 +20,8 @@ struct lsm_memtable {
 	spinlock_t lock;
 };
 
+struct lsm_memtable *memtable_create(void);
+void memtable_free(struct lsm_memtable *memtable);
 int memtable_init(struct lsm_memtable *memtable);
 void memtable_destroy(struct lsm_memtable *memtable);
 int memtable_lookup(struct lsm_memtable *memtable, sector_t logical_block,

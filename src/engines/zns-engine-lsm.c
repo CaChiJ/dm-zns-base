@@ -11,11 +11,16 @@
 #include "zns-engine.h"
 #include "zns-zone.h"
 
+#define ZNS_LSM_MEMTABLE_THRESHOLD 16384
+
 struct zns_lsm {
 	struct block_device *lower_bdev;
 	struct zns_zone_table zone_table;
 	struct zns_allocator allocator;
-	struct lsm_memtable memtable;
+	struct lsm_memtable *active_memtable;
+	struct lsm_memtable *immutable_memtable;
+	spinlock_t table_lock;
+	unsigned int memtable_threshold;
 	sector_t sectors_per_block;
 };
 
@@ -36,7 +41,8 @@ static int zns_lsm_read(struct zns_lsm *lsm, sector_t logical_sector,
 		return -EINVAL;
 
 	logical_block = logical_sector / lsm->sectors_per_block;
-	return memtable_lookup(&lsm->memtable, logical_block, physical_sector,
+	return memtable_lookup(lsm->active_memtable, logical_block,
+			       physical_sector,
 			       NULL);
 }
 
@@ -54,7 +60,8 @@ static int zns_lsm_write(struct zns_lsm *lsm, sector_t logical_sector,
 	if (ret)
 		return ret;
 
-	return memtable_put(&lsm->memtable, logical_block, *physical_sector);
+	return memtable_put(lsm->active_memtable, logical_block,
+			    *physical_sector);
 }
 
 int zns_engine_init(struct zns_engine *engine, struct block_device *lower_bdev,
@@ -75,6 +82,8 @@ int zns_engine_init(struct zns_engine *engine, struct block_device *lower_bdev,
 
 	lsm->lower_bdev = lower_bdev;
 	lsm->sectors_per_block = sectors_per_block;
+	lsm->memtable_threshold = ZNS_LSM_MEMTABLE_THRESHOLD;
+	spin_lock_init(&lsm->table_lock);
 
 	ret = zns_zone_table_init(&lsm->zone_table, lower_bdev);
 	if (ret)
@@ -87,9 +96,12 @@ int zns_engine_init(struct zns_engine *engine, struct block_device *lower_bdev,
 	if (ret)
 		goto destroy_zone_table;
 
-	ret = memtable_init(&lsm->memtable);
-	if (ret)
+	lsm->active_memtable = memtable_create();
+	if (!lsm->active_memtable) {
+		ret = -ENOMEM;
 		goto exit_allocator;
+	}
+	lsm->immutable_memtable = NULL;
 
 	engine->private = lsm;
 	return 0;
@@ -114,7 +126,8 @@ void zns_engine_exit(struct zns_engine *engine)
 	if (!lsm)
 		return;
 
-	memtable_destroy(&lsm->memtable);
+	memtable_free(lsm->active_memtable);
+	memtable_free(lsm->immutable_memtable);
 	zns_allocator_exit(&lsm->allocator);
 	zns_zone_table_destroy(&lsm->zone_table);
 	kfree(lsm);

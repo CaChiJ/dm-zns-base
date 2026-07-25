@@ -6,6 +6,35 @@
 
 #include "../src/lsm-memtable.c"
 
+static int memtable_test_heap_lifecycle(void)
+{
+	struct lsm_memtable *active;
+	struct lsm_memtable *immutable = NULL;
+	sector_t physical_sector;
+	int ret;
+
+	active = memtable_create();
+	if (!active)
+		return -ENOMEM;
+	if (!RB_EMPTY_ROOT(&active->root) || active->nr_entries ||
+	    active->next_sequence != 1) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	ret = memtable_put(active, 7, 56);
+	if (ret)
+		goto out;
+	ret = memtable_lookup(active, 7, &physical_sector, NULL);
+	if (ret || physical_sector != 56)
+		ret = -EINVAL;
+
+out:
+	memtable_free(active);
+	memtable_free(immutable);
+	return ret;
+}
+
 static int memtable_test_insert_lookup_update(void)
 {
 	struct lsm_memtable memtable;
@@ -153,6 +182,10 @@ out:
 static int __init memtable_test_init(void)
 {
 	int ret;
+
+	ret = memtable_test_heap_lifecycle();
+	if (ret)
+		goto fail;
 
 	ret = memtable_test_insert_lookup_update();
 	if (ret)

@@ -26,6 +26,33 @@ static struct lsm_entry *memtable_find(struct lsm_memtable *memtable,
 	return NULL;
 }
 
+struct lsm_memtable *memtable_create(void)
+{
+	struct lsm_memtable *memtable;
+	int ret;
+
+	memtable = kzalloc(sizeof(*memtable), GFP_KERNEL);
+	if (!memtable)
+		return NULL;
+
+	ret = memtable_init(memtable);
+	if (ret) {
+		kfree(memtable);
+		return NULL;
+	}
+
+	return memtable;
+}
+
+void memtable_free(struct lsm_memtable *memtable)
+{
+	if (!memtable)
+		return;
+
+	memtable_destroy(memtable);
+	kfree(memtable);
+}
+
 int memtable_init(struct lsm_memtable *memtable)
 {
 	if (!memtable)
