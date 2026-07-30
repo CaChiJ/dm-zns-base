@@ -15,3 +15,10 @@ Module.symvers
 .idea/
 *.swp
 .DS_Store
+
+# Local VM Settings
+.vagrant/
+.vagrant-home/
+
+# Local Codex instructions and connection details
+/AGENTS.md
