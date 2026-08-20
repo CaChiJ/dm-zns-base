@@ -12,6 +12,7 @@
  */
 
 #include <linux/bio.h>
+#include <linux/blkzoned.h>
 #include <linux/device-mapper.h>
 #include <linux/errno.h>
 #include <linux/list.h>
@@ -470,6 +471,7 @@ static int zns_lsm_open_metadata(struct zns_lsm *lsm, sector_t logical_sectors)
 {
 	const struct zns_zone *meta;
 	struct zns_super on_disk;
+	sector_t meta_wp;
 	int ret;
 
 	if (lsm->zone_table.nr_zones < 2)
@@ -478,12 +480,28 @@ static int zns_lsm_open_metadata(struct zns_lsm *lsm, sector_t logical_sectors)
 	meta = &lsm->zone_table.zones[lsm->zone_table.nr_zones - 1];
 	if (meta->capacity < ZNS_SST_BLOCK_SECTORS)
 		return -EINVAL;
-	if (meta->write_pointer < meta->start_sector ||
-	    meta->write_pointer > meta->start_sector + meta->capacity)
+	if (meta->write_pointer < meta->start_sector)
 		return -EINVAL;
 
 	lsm->meta_start = meta->start_sector;
 	lsm->meta_end = meta->start_sector + meta->capacity;
+
+	/*
+	 * A full zone reports its write pointer at the end of the zone, which
+	 * is past the capacity whenever the zone has a capacity hole. Clamp
+	 * rather than refuse: the SSTables in it are still readable, and a
+	 * flush that tries to append will fail with -ENOSPC on its own.
+	 * zns_zone_metadata_valid() makes the same allowance for data zones,
+	 * and refusing here would mean a metadata zone can be filled once and
+	 * then never opened again.
+	 */
+	if (meta->condition == BLK_ZONE_COND_FULL) {
+		meta_wp = lsm->meta_end;
+	} else {
+		if (meta->write_pointer > lsm->meta_end)
+			return -EINVAL;
+		meta_wp = meta->write_pointer;
+	}
 
 	lsm->super.logical_sectors = logical_sectors;
 	lsm->super.zone_size_sectors = meta->length;
@@ -491,7 +509,7 @@ static int zns_lsm_open_metadata(struct zns_lsm *lsm, sector_t logical_sectors)
 	lsm->super.meta_zone_id = meta->id;
 	lsm->super.sectors_per_block = lsm->sectors_per_block;
 
-	if (meta->write_pointer != meta->start_sector) {
+	if (meta_wp != lsm->meta_start) {
 		ret = zns_super_read(lsm->lower_bdev, lsm->meta_start,
 				     &on_disk);
 		if (ret) {
@@ -506,7 +524,7 @@ static int zns_lsm_open_metadata(struct zns_lsm *lsm, sector_t logical_sectors)
 
 		/* Adopt the existing format, uuid included. */
 		lsm->super = on_disk;
-		lsm->meta_wp = meta->write_pointer;
+		lsm->meta_wp = meta_wp;
 		return zns_lsm_recover_sstables(lsm);
 	}
 
