@@ -172,6 +172,14 @@ int zns_engine_map(struct zns_engine *engine, struct bio *bio)
 	}
 }
 
+void zns_engine_status(struct zns_engine *engine, char *result,
+		       unsigned int maxlen)
+{
+	unsigned int sz = 0;
+
+	DMEMIT("%s", zns_engine_name());
+}
+
 const char *zns_engine_name(void)
 {
 	return "append4k-alloc";

@@ -210,6 +210,27 @@ int zns_engine_map(struct zns_engine *engine, struct bio *bio)
 	}
 }
 
+void zns_engine_status(struct zns_engine *engine, char *result,
+		       unsigned int maxlen)
+{
+	unsigned int active, immutable;
+	struct zns_lsm *lsm;
+	unsigned int sz = 0;
+
+	if (!engine || !engine->private) {
+		DMEMIT("lsm uninitialized");
+		return;
+	}
+	lsm = engine->private;
+
+	mutex_lock(&lsm->table_lock);
+	active = memtable_size(lsm->active_memtable);
+	immutable = memtable_size(lsm->immutable_memtable);
+	mutex_unlock(&lsm->table_lock);
+
+	DMEMIT("lsm active=%u immutable=%u", active, immutable);
+}
+
 const char *zns_engine_name(void)
 {
 	return "lsm";

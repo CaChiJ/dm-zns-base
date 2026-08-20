@@ -81,6 +81,29 @@ static int zns_base_map(struct dm_target *ti, struct bio *bio)
 	return zns_engine_map(&c->engine, bio);
 }
 
+static void zns_base_status(struct dm_target *ti, status_type_t type,
+			    unsigned int status_flags, char *result,
+			    unsigned int maxlen)
+{
+	struct zns_base_c *c = ti->private;
+	unsigned int sz = 0;
+
+	if (!maxlen)
+		return;
+	result[0] = '\0';
+
+	switch (type) {
+	case STATUSTYPE_INFO:
+		zns_engine_status(&c->engine, result, maxlen);
+		break;
+	case STATUSTYPE_TABLE:
+		DMEMIT("%s", c->dev->name);
+		break;
+	default:
+		break;
+	}
+}
+
 static struct target_type zns_base_target = {
 	.name            = "zns-base",
 	.version         = {0, 1, 0},
@@ -88,6 +111,7 @@ static struct target_type zns_base_target = {
 	.ctr             = zns_base_ctr,
 	.dtr             = zns_base_dtr,
 	.map             = zns_base_map,
+	.status          = zns_base_status,
 };
 
 static int __init zns_base_init(void)
