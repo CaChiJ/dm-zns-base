@@ -69,6 +69,26 @@ create_dm_target() {
 	ZNS_TARGET_CREATED=1
 }
 
+# Recreate this suite's target on the same underlying device without touching
+# the zones. That is exactly what a restart looks like to the engine: the DM
+# instance goes away and a new one opens the same media.
+recreate_dm_target() {
+	remove_dm_target
+	ZNS_TARGET_CREATED=0
+	create_dm_target
+}
+
+# Attempt a target of an arbitrary size and report whether dmsetup accepted it.
+# Unlike create_dm_target this never aborts the suite, because a refused
+# creation is the expected result for some cases.
+try_create_dm_target() {
+	local name=$1
+	local sectors=$2
+
+	echo "0 $sectors zns-base $UNDERLYING" |
+		dmsetup create "$name" 2>/dev/null
+}
+
 reset_zones() {
 	blkzone reset "$UNDERLYING" ||
 		die "failed to reset the zones of $UNDERLYING"
@@ -146,9 +166,9 @@ zone_write_pointer() {
 		}'
 }
 
-# Absolute write pointer of the last zone, which the LSM engine reserves
-# for SSTables.
-meta_zone_write_pointer() {
+# Absolute "start wptr" pair for the last zone, which the LSM engine reserves
+# for its superblock and SSTables. Both values are decimal.
+meta_zone_geometry() {
 	local raw start wptr
 
 	raw=$(blkzone report "$UNDERLYING" | tail -n 1 |
@@ -175,10 +195,23 @@ meta_zone_write_pointer() {
 	wptr=$(printf '%u' "$2") || return 1
 
 	if [ "$wptr" -lt "$start" ]; then
-		echo $((start + wptr))
-	else
-		echo "$wptr"
+		wptr=$((start + wptr))
 	fi
+	printf '%u %u\n' "$start" "$wptr"
+}
+
+meta_zone_start() {
+	local geometry
+
+	geometry=$(meta_zone_geometry) || return 1
+	printf '%s\n' "${geometry% *}"
+}
+
+meta_zone_write_pointer() {
+	local geometry
+
+	geometry=$(meta_zone_geometry) || return 1
+	printf '%s\n' "${geometry#* }"
 }
 
 # One "id start length capacity wptr" row per zone, values normalized to
