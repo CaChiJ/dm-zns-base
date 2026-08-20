@@ -2,6 +2,7 @@
 #ifndef _LSM_SSTABLE_H
 #define _LSM_SSTABLE_H
 
+#include <linux/blk_types.h>
 #include <linux/list.h>
 #include <linux/types.h>
 
@@ -53,6 +54,15 @@ struct zns_sstable {
 	sector_t max_key;
 	u64 seq;
 };
+
+/*
+ * Submit one 4 KiB metadata block and wait for it. The buffer must come from
+ * kmalloc() so that it is permanently mapped; no kmap is needed around the
+ * sleeping submission. Shared with the superblock, which lives in the same
+ * reserved zone.
+ */
+int zns_meta_block_rw(struct block_device *bdev, sector_t sector,
+		      blk_opf_t opf, void *buffer);
 
 /* Total blocks, header included, needed to hold nr_entries mappings. */
 unsigned int zns_sst_nr_blocks(u32 nr_entries);

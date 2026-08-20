@@ -121,12 +121,8 @@ int zns_sst_block_find(const void *block, unsigned int nr_in_block,
 	return -ENODATA;
 }
 
-/*
- * Submit one 4 KiB block and wait. The buffer comes from kmalloc() so it is
- * permanently mapped; no kmap is needed around the sleeping submission.
- */
-static int zns_sst_submit_block(struct block_device *bdev, sector_t sector,
-				blk_opf_t opf, void *buffer)
+int zns_meta_block_rw(struct block_device *bdev, sector_t sector,
+		      blk_opf_t opf, void *buffer)
 {
 	struct bio *bio;
 	int ret;
@@ -165,7 +161,7 @@ static int zns_sst_consume_block(struct zns_sst_write_ctx *ctx,
 	if (!ctx->write)
 		return 0;
 
-	ret = zns_sst_submit_block(ctx->bdev, ctx->sector, REQ_OP_WRITE,
+	ret = zns_meta_block_rw(ctx->bdev, ctx->sector, REQ_OP_WRITE,
 				   (void *)block);
 	if (ret)
 		return ret;
@@ -291,7 +287,7 @@ int zns_sst_write(struct block_device *bdev, struct lsm_memtable *memtable,
 		goto free_block;
 
 	zns_sst_encode_header(block, sst, ctx.crc);
-	ret = zns_sst_submit_block(bdev, start_sector, REQ_OP_WRITE, block);
+	ret = zns_meta_block_rw(bdev, start_sector, REQ_OP_WRITE, block);
 	if (ret)
 		goto free_block;
 	*consumed = ZNS_SST_BLOCK_SECTORS;
@@ -335,7 +331,7 @@ static int zns_sst_read_payload_block(struct block_device *bdev,
 
 	sector = sst->start_sector +
 		 (sector_t)(block_index + 1) * ZNS_SST_BLOCK_SECTORS;
-	ret = zns_sst_submit_block(bdev, sector, REQ_OP_READ, block);
+	ret = zns_meta_block_rw(bdev, sector, REQ_OP_READ, block);
 	if (ret)
 		return ret;
 

@@ -16,11 +16,13 @@
 #include <linux/errno.h>
 #include <linux/list.h>
 #include <linux/module.h>
+#include <linux/random.h>
 #include <linux/slab.h>
 #include <linux/workqueue.h>
 
 #include "lsm-memtable.h"
 #include "lsm-sstable.h"
+#include "lsm-super.h"
 #include "zns-allocator.h"
 #include "zns-engine.h"
 #include "zns-zone.h"
@@ -58,6 +60,7 @@ struct zns_lsm {
 	sector_t meta_start;
 	sector_t meta_wp;
 	sector_t meta_end;
+	struct zns_super super;
 
 	struct workqueue_struct *flush_wq;
 	struct workqueue_struct *read_wq;
@@ -388,26 +391,83 @@ static void zns_lsm_free_sstables(struct zns_lsm *lsm)
 	lsm->nr_sst_entries = 0;
 }
 
+static bool zns_lsm_data_zones_dirty(const struct zns_lsm *lsm)
+{
+	unsigned int i;
+
+	for (i = 0; i + 1 < lsm->zone_table.nr_zones; i++)
+		if (lsm->zone_table.zones[i].write_pointer !=
+		    lsm->zone_table.zones[i].start_sector)
+			return true;
+
+	return false;
+}
+
 /*
- * Reserve the last zone of the underlying device for SSTables and hand the
+ * Reserve the last zone of the underlying device for metadata and hand the
  * allocator only the zones ahead of it.
+ *
+ * An empty metadata zone means the device was never formatted, so the
+ * superblock goes into its first block. Otherwise the superblock is read back
+ * and has to describe the device actually in front of us. A mismatch is
+ * refused instead of worked around: every mapping below it was recorded
+ * against the geometry it names, and a moved reserved zone would turn them
+ * into ordinary data space with no error anywhere.
  */
-static int zns_lsm_init_metadata_zone(struct zns_lsm *lsm)
+static int zns_lsm_open_metadata(struct zns_lsm *lsm, sector_t logical_sectors)
 {
 	const struct zns_zone *meta;
+	struct zns_super on_disk;
+	int ret;
 
 	if (lsm->zone_table.nr_zones < 2)
 		return -EINVAL;
 
 	meta = &lsm->zone_table.zones[lsm->zone_table.nr_zones - 1];
+	if (meta->capacity < ZNS_SST_BLOCK_SECTORS)
+		return -EINVAL;
 	if (meta->write_pointer < meta->start_sector ||
 	    meta->write_pointer > meta->start_sector + meta->capacity)
 		return -EINVAL;
 
 	lsm->meta_start = meta->start_sector;
-	lsm->meta_wp = meta->write_pointer;
 	lsm->meta_end = meta->start_sector + meta->capacity;
 
+	lsm->super.logical_sectors = logical_sectors;
+	lsm->super.zone_size_sectors = meta->length;
+	lsm->super.nr_zones = lsm->zone_table.nr_zones;
+	lsm->super.meta_zone_id = meta->id;
+	lsm->super.sectors_per_block = lsm->sectors_per_block;
+
+	if (meta->write_pointer != meta->start_sector) {
+		ret = zns_super_read(lsm->lower_bdev, lsm->meta_start,
+				     &on_disk);
+		if (ret) {
+			DMERR("metadata zone %u holds no superblock we wrote: %d",
+			      meta->id, ret);
+			return ret;
+		}
+
+		ret = zns_super_matches(&on_disk, &lsm->super);
+		if (ret)
+			return ret;
+
+		/* Adopt the existing format, uuid included. */
+		lsm->super = on_disk;
+		lsm->meta_wp = meta->write_pointer;
+		return 0;
+	}
+
+	if (zns_lsm_data_zones_dirty(lsm))
+		DMWARN("formatting an empty metadata zone while data zones already hold writes; their mappings are unrecoverable");
+
+	lsm->super.uuid = get_random_u64();
+	ret = zns_super_write(lsm->lower_bdev, lsm->meta_start, &lsm->super);
+	if (ret)
+		return ret;
+
+	lsm->meta_wp = lsm->meta_start + ZNS_SST_BLOCK_SECTORS;
+	DMINFO("lsm: formatted metadata zone %u", meta->id);
 	return 0;
 }
 
@@ -442,7 +502,7 @@ int zns_engine_init(struct zns_engine *engine, struct block_device *lower_bdev,
 	if (ret)
 		goto free_lsm;
 
-	ret = zns_lsm_init_metadata_zone(lsm);
+	ret = zns_lsm_open_metadata(lsm, logical_sectors);
 	if (ret)
 		goto destroy_zone_table;
 
