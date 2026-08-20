@@ -1,5 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0
-/* LSM engine skeleton with allocator and MemTable lifecycle management. */
+/*
+ * LSM engine with allocator and MemTable lifecycle management.
+ *
+ * The last zone of the underlying device is reserved for mapping metadata, so
+ * the allocator only ever sees the zones ahead of it.
+ */
 
 #include <linux/bio.h>
 #include <linux/device-mapper.h>
@@ -11,6 +16,8 @@
 #include "zns-allocator.h"
 #include "zns-engine.h"
 #include "zns-zone.h"
+
+#define DM_MSG_PREFIX "zns-base"
 
 #define ZNS_LSM_MEMTABLE_THRESHOLD 16384
 
@@ -29,6 +36,11 @@ struct zns_lsm {
 	struct mutex table_lock;
 	unsigned int memtable_threshold;
 	sector_t sectors_per_block;
+
+	/* Reserved metadata zone. Set once at init and read-only afterwards. */
+	sector_t meta_start;
+	sector_t meta_wp;
+	sector_t meta_end;
 };
 
 static int __maybe_unused zns_lsm_freeze_memtable(struct zns_lsm *lsm)
@@ -94,6 +106,30 @@ static int zns_lsm_write(struct zns_lsm *lsm, sector_t logical_sector,
 				   logical_block, *physical_sector);
 }
 
+/*
+ * Reserve the last zone of the underlying device for mapping metadata and hand
+ * the allocator only the zones ahead of it. The allocator cannot tell this
+ * apart from a slightly smaller device, so it needs no changes.
+ */
+static int zns_lsm_init_metadata_zone(struct zns_lsm *lsm)
+{
+	const struct zns_zone *meta;
+
+	if (lsm->zone_table.nr_zones < 2)
+		return -EINVAL;
+
+	meta = &lsm->zone_table.zones[lsm->zone_table.nr_zones - 1];
+	if (meta->write_pointer < meta->start_sector ||
+	    meta->write_pointer > meta->start_sector + meta->capacity)
+		return -EINVAL;
+
+	lsm->meta_start = meta->start_sector;
+	lsm->meta_wp = meta->write_pointer;
+	lsm->meta_end = meta->start_sector + meta->capacity;
+
+	return 0;
+}
+
 int zns_engine_init(struct zns_engine *engine, struct block_device *lower_bdev,
 		    sector_t logical_sectors, sector_t physical_sectors,
 		    sector_t sectors_per_block)
@@ -120,9 +156,13 @@ int zns_engine_init(struct zns_engine *engine, struct block_device *lower_bdev,
 	if (ret)
 		goto free_lsm;
 
+	ret = zns_lsm_init_metadata_zone(lsm);
+	if (ret)
+		goto destroy_zone_table;
+
 	ret = zns_allocator_init_zoned(&lsm->allocator,
 				       lsm->zone_table.zones,
-				       lsm->zone_table.nr_zones,
+				       lsm->zone_table.nr_zones - 1,
 				       sectors_per_block);
 	if (ret)
 		goto destroy_zone_table;
@@ -135,6 +175,9 @@ int zns_engine_init(struct zns_engine *engine, struct block_device *lower_bdev,
 	lsm->immutable_memtable = NULL;
 
 	engine->private = lsm;
+	DMINFO("lsm: %u data zones, metadata zone at sector %llu",
+	       lsm->zone_table.nr_zones - 1,
+	       (unsigned long long)lsm->meta_start);
 	return 0;
 
 exit_allocator:
@@ -213,6 +256,7 @@ int zns_engine_map(struct zns_engine *engine, struct bio *bio)
 void zns_engine_status(struct zns_engine *engine, char *result,
 		       unsigned int maxlen)
 {
+	unsigned long long meta_used;
 	unsigned int active, immutable;
 	struct zns_lsm *lsm;
 	unsigned int sz = 0;
@@ -228,7 +272,10 @@ void zns_engine_status(struct zns_engine *engine, char *result,
 	immutable = memtable_size(lsm->immutable_memtable);
 	mutex_unlock(&lsm->table_lock);
 
-	DMEMIT("lsm active=%u immutable=%u", active, immutable);
+	meta_used = lsm->meta_wp - lsm->meta_start;
+
+	DMEMIT("lsm active=%u immutable=%u meta_used=%llu",
+	       active, immutable, meta_used);
 }
 
 const char *zns_engine_name(void)
