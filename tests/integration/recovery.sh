@@ -178,8 +178,7 @@ run_case "when a flushed block is rewritten before the restart, the older value 
 
 # --- a full module reload, not just a new target ----------------------------
 
-remove_dm_target
-ZNS_TARGET_CREATED=0
+detach_dm_target
 load_module memtable_threshold="$TEST_THRESHOLD"
 create_dm_target
 
@@ -213,8 +212,7 @@ run_case "when writes continue after a restart, a second restart returns them to
 # The live target goes first, so that a refusal can only come from the
 # superblock and not from the device already being claimed.
 
-remove_dm_target
-ZNS_TARGET_CREATED=0
+detach_dm_target
 
 case_length_mismatch_refused() {
 	local name="${TARGET_NAME}-short"

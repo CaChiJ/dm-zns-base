@@ -69,12 +69,23 @@ create_dm_target() {
 	ZNS_TARGET_CREATED=1
 }
 
-# Recreate this suite's target on the same underlying device without touching
-# the zones. That is exactly what a restart looks like to the engine: the DM
-# instance goes away and a new one opens the same media.
-recreate_dm_target() {
-	remove_dm_target
+# Take this suite's target down and insist that it went. remove_dm_target
+# swallows failures because teardown must not mask a real result, but a suite
+# that means to restart has to know the old instance is gone -- otherwise the
+# next create fails with "already exists" and says nothing about why.
+#
+# --retry rides out the moment udev still holds the node open after the last
+# I/O.
+detach_dm_target() {
+	dmsetup remove --retry "$TARGET_NAME" ||
+		die "failed to remove the target $TARGET_NAME"
 	ZNS_TARGET_CREATED=0
+}
+
+# Restart the engine on the same media: the DM instance goes away and a new one
+# opens the device again, with no zone reset in between.
+recreate_dm_target() {
+	detach_dm_target
 	create_dm_target
 }
 
