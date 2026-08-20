@@ -603,6 +603,57 @@ free_lsm:
 	return ret;
 }
 
+/*
+ * Persist whatever is still resident, oldest generation first.
+ *
+ * The order is the whole point. A read takes the first hit walking the SSTable
+ * list from its head, so a younger generation has to be appended behind an
+ * older one. Reversed, a block that was overwritten just before shutdown would
+ * come back holding the value it had before the overwrite.
+ *
+ * Both workqueues are already gone and device-mapper has drained the target,
+ * so this is the only thread left touching the engine.
+ */
+static void zns_lsm_flush_all_sync(struct zns_lsm *lsm)
+{
+	struct lsm_memtable *generations[] = {
+		lsm->flushing_memtable,
+		lsm->immutable_memtable,
+		lsm->active_memtable,
+	};
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(generations); i++) {
+		struct zns_sstable *sst;
+		sector_t consumed;
+		int ret;
+
+		if (!generations[i])
+			continue;
+
+		ret = zns_sst_write(lsm->lower_bdev, generations[i],
+				    lsm->meta_wp, lsm->meta_end,
+				    lsm->next_sst_seq, &sst, &consumed);
+		lsm->meta_wp += consumed;
+
+		if (ret == -ENODATA)	/* an empty generation holds nothing */
+			continue;
+		if (ret) {
+			/*
+			 * Stop instead of skipping ahead. Writing a younger
+			 * generation over the gap left by an older one that
+			 * failed would let stale mappings outrank fresh ones.
+			 */
+			DMERR("shutdown flush stopped after %u of %u generations: %d",
+			      i, (unsigned int)ARRAY_SIZE(generations), ret);
+			return;
+		}
+
+		lsm->next_sst_seq++;
+		kfree(sst);
+	}
+}
+
 void zns_engine_exit(struct zns_engine *engine)
 {
 	struct zns_lsm *lsm;
@@ -617,6 +668,9 @@ void zns_engine_exit(struct zns_engine *engine)
 	/* Drain both queues before anything they reference goes away. */
 	destroy_workqueue(lsm->read_wq);
 	destroy_workqueue(lsm->flush_wq);
+
+	/* Only now is nothing else writing, so the tables can be serialized. */
+	zns_lsm_flush_all_sync(lsm);
 
 	memtable_free(lsm->active_memtable);
 	memtable_free(lsm->immutable_memtable);
