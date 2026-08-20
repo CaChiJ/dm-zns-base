@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * LSM engine with allocator and MemTable lifecycle management.
+ * LSM engine: MemTable generations backed by on-disk SSTables.
  *
- * The last zone of the underlying device is reserved for mapping metadata, so
- * the allocator only ever sees the zones ahead of it. Reads walk
+ * Writes append to the zoned allocator and land in the active MemTable. When it
+ * reaches the threshold it is frozen, then flushed to the reserved metadata zone
+ * as an SSTable and released from memory. Reads walk
  *
- *	active -> immutable -> SSTables (newest first)
+ *	active -> immutable -> flushing -> SSTables (newest first)
  *
  * and fall back to a zero fill when the logical block was never written.
  */
@@ -38,9 +39,13 @@ struct zns_lsm {
 	struct block_device *lower_bdev;
 	struct zns_zone_table zone_table;
 	struct zns_allocator allocator;
+
+	/* MemTable generations, all guarded by table_lock. */
 	struct lsm_memtable *active_memtable;
 	struct lsm_memtable *immutable_memtable;
+	struct lsm_memtable *flushing_memtable;
 	struct mutex table_lock;
+	bool flush_in_flight;
 	unsigned int memtable_threshold;
 	sector_t sectors_per_block;
 
@@ -54,7 +59,9 @@ struct zns_lsm {
 	sector_t meta_wp;
 	sector_t meta_end;
 
+	struct workqueue_struct *flush_wq;
 	struct workqueue_struct *read_wq;
+	struct work_struct flush_work;
 };
 
 struct zns_lsm_read_work {
@@ -73,22 +80,39 @@ static int __maybe_unused zns_lsm_freeze_memtable(struct zns_lsm *lsm)
 			       &lsm->table_lock);
 }
 
-static int zns_lsm_lookup_mapping(
-		struct zns_lsm *lsm, sector_t logical_block,
-		sector_t *physical_sector)
+/*
+ * Newest generation wins. memtable_lookup_active_immutable() only knows about
+ * two generations, so the flushing slot is checked here under the same lock.
+ */
+static int zns_lsm_lookup_memtables(struct zns_lsm *lsm, sector_t logical_block,
+				    sector_t *physical_sector)
 {
-	if (!lsm || !physical_sector)
-		return -EINVAL;
+	int ret;
 
-	return memtable_lookup_active_immutable(
-			&lsm->active_memtable, &lsm->immutable_memtable,
-			&lsm->table_lock, logical_block, physical_sector);
+	mutex_lock(&lsm->table_lock);
+	if (!lsm->active_memtable) {
+		ret = -EINVAL;
+		goto unlock;
+	}
+
+	ret = memtable_lookup(lsm->active_memtable, logical_block,
+			      physical_sector, NULL);
+	if (ret == -ENODATA && lsm->immutable_memtable)
+		ret = memtable_lookup(lsm->immutable_memtable, logical_block,
+				      physical_sector, NULL);
+	if (ret == -ENODATA && lsm->flushing_memtable)
+		ret = memtable_lookup(lsm->flushing_memtable, logical_block,
+				      physical_sector, NULL);
+
+unlock:
+	mutex_unlock(&lsm->table_lock);
+	return ret;
 }
 
 /*
- * Sleeps on SSTable block reads, so this only runs from the read workqueue. The
- * list is append-only for now, but sst_lock is held for the whole walk so that
- * a newly published SSTable cannot be spliced in underneath it.
+ * Sleeps on SSTable reads, so this only runs from the read workqueue. The list
+ * is append-only in this milestone, but sst_lock is held for the whole walk so
+ * that a concurrent flush cannot splice a new head underneath it.
  */
 static int zns_lsm_lookup_sstables(struct zns_lsm *lsm, sector_t logical_block,
 				   sector_t *physical_sector)
@@ -127,16 +151,130 @@ static bool zns_lsm_is_aligned_io(const struct zns_lsm *lsm,
 	       logical_sector % lsm->sectors_per_block == 0;
 }
 
-static int zns_lsm_read(struct zns_lsm *lsm, sector_t logical_sector,
-			unsigned int sectors, sector_t *physical_sector)
+/*
+ * Claim the next MemTable to flush. A table already parked in the flushing slot
+ * is a previous attempt that failed and is retried first. Moving the table out
+ * of the immutable slot keeps memtable_put_active() from replacing and freeing
+ * it while the flush is in progress.
+ */
+static struct lsm_memtable *zns_lsm_claim_flush_victim(struct zns_lsm *lsm)
 {
-	sector_t logical_block;
+	struct lsm_memtable *victim;
 
-	if (!zns_lsm_is_aligned_io(lsm, logical_sector, sectors))
-		return -EINVAL;
+	mutex_lock(&lsm->table_lock);
+	if (!lsm->flushing_memtable) {
+		lsm->flushing_memtable = lsm->immutable_memtable;
+		lsm->immutable_memtable = NULL;
+	}
+	victim = lsm->flushing_memtable;
+	mutex_unlock(&lsm->table_lock);
 
-	logical_block = logical_sector / lsm->sectors_per_block;
-	return zns_lsm_lookup_mapping(lsm, logical_block, physical_sector);
+	return victim;
+}
+
+static void zns_lsm_release_flush_victim(struct zns_lsm *lsm,
+					 struct lsm_memtable *victim)
+{
+	mutex_lock(&lsm->table_lock);
+	lsm->flushing_memtable = NULL;
+	mutex_unlock(&lsm->table_lock);
+
+	memtable_free(victim);
+}
+
+/*
+ * Give up the metadata sectors a flush attempt burned. This must happen even
+ * when the flush failed: the zone write pointer has already moved past them, so
+ * reusing the same sectors would be a sequential-write violation.
+ */
+static void zns_lsm_advance_meta_wp(struct zns_lsm *lsm, sector_t start,
+				    sector_t consumed)
+{
+	mutex_lock(&lsm->sst_lock);
+	if (start + consumed > lsm->meta_wp)
+		lsm->meta_wp = start + consumed;
+	mutex_unlock(&lsm->sst_lock);
+}
+
+static void zns_lsm_publish_sstable(struct zns_lsm *lsm,
+				    struct zns_sstable *sst)
+{
+	mutex_lock(&lsm->sst_lock);
+	list_add(&sst->list, &lsm->sstables);
+	lsm->nr_sstables++;
+	lsm->nr_sst_entries += sst->nr_entries;
+	lsm->next_sst_seq++;
+	mutex_unlock(&lsm->sst_lock);
+}
+
+static void zns_lsm_maybe_queue_flush(struct zns_lsm *lsm)
+{
+	bool queue;
+
+	mutex_lock(&lsm->table_lock);
+	queue = !lsm->flush_in_flight &&
+		(lsm->immutable_memtable || lsm->flushing_memtable);
+	if (queue)
+		lsm->flush_in_flight = true;
+	mutex_unlock(&lsm->table_lock);
+
+	if (queue)
+		queue_work(lsm->flush_wq, &lsm->flush_work);
+}
+
+static void zns_lsm_flush_worker(struct work_struct *work)
+{
+	struct zns_lsm *lsm = container_of(work, struct zns_lsm, flush_work);
+	bool failed = false;
+
+	for (;;) {
+		struct lsm_memtable *victim;
+		struct zns_sstable *sst;
+		sector_t consumed;
+		sector_t start;
+		u64 seq;
+		int ret;
+
+		victim = zns_lsm_claim_flush_victim(lsm);
+		if (!victim)
+			break;
+
+		mutex_lock(&lsm->sst_lock);
+		start = lsm->meta_wp;
+		seq = lsm->next_sst_seq;
+		mutex_unlock(&lsm->sst_lock);
+
+		ret = zns_sst_write(lsm->lower_bdev, victim, start,
+				    lsm->meta_end, seq, &sst, &consumed);
+		if (consumed)
+			zns_lsm_advance_meta_wp(lsm, start, consumed);
+
+		if (ret == -ENODATA) {
+			/* Nothing to persist; just reclaim the table. */
+			zns_lsm_release_flush_victim(lsm, victim);
+			continue;
+		}
+		if (ret) {
+			/*
+			 * Leave the table in the flushing slot: reads keep
+			 * finding it and the next write retries the flush.
+			 */
+			DMERR_LIMIT("sstable flush failed: %d", ret);
+			failed = true;
+			break;
+		}
+
+		zns_lsm_publish_sstable(lsm, sst);
+		zns_lsm_release_flush_victim(lsm, victim);
+	}
+
+	mutex_lock(&lsm->table_lock);
+	lsm->flush_in_flight = false;
+	mutex_unlock(&lsm->table_lock);
+
+	/* Catch a freeze that landed after the last claim but before the clear. */
+	if (!failed)
+		zns_lsm_maybe_queue_flush(lsm);
 }
 
 static void zns_lsm_read_worker(struct work_struct *work)
@@ -151,7 +289,8 @@ static void zns_lsm_read_worker(struct work_struct *work)
 
 	logical_block = bio->bi_iter.bi_sector / lsm->sectors_per_block;
 
-	ret = zns_lsm_lookup_mapping(lsm, logical_block, &physical_sector);
+	/* Re-check: a flush may have moved the mapping since the .map() miss. */
+	ret = zns_lsm_lookup_memtables(lsm, logical_block, &physical_sector);
 	if (ret == -ENODATA)
 		ret = zns_lsm_lookup_sstables(lsm, logical_block,
 					      &physical_sector);
@@ -174,7 +313,7 @@ static void zns_lsm_read_worker(struct work_struct *work)
 /*
  * SSTable lookups sleep on block reads, which .map() cannot do, so a MemTable
  * miss is handed to the read workqueue. Without any SSTable on disk the answer
- * is already known and the bio is completed right here.
+ * is already known and the bio is completed here.
  */
 static int zns_lsm_queue_read(struct zns_lsm *lsm, struct bio *bio)
 {
@@ -198,6 +337,18 @@ static int zns_lsm_queue_read(struct zns_lsm *lsm, struct bio *bio)
 	return DM_MAPIO_SUBMITTED;
 }
 
+static int zns_lsm_read(struct zns_lsm *lsm, sector_t logical_sector,
+			unsigned int sectors, sector_t *physical_sector)
+{
+	sector_t logical_block;
+
+	if (!zns_lsm_is_aligned_io(lsm, logical_sector, sectors))
+		return -EINVAL;
+
+	logical_block = logical_sector / lsm->sectors_per_block;
+	return zns_lsm_lookup_memtables(lsm, logical_block, physical_sector);
+}
+
 static int zns_lsm_write(struct zns_lsm *lsm, sector_t logical_sector,
 			 unsigned int sectors, sector_t *physical_sector)
 {
@@ -212,11 +363,16 @@ static int zns_lsm_write(struct zns_lsm *lsm, sector_t logical_sector,
 	if (ret)
 		return ret;
 
-	return memtable_put_active(&lsm->active_memtable,
-				   &lsm->immutable_memtable,
-				   &lsm->table_lock,
-				   lsm->memtable_threshold,
-				   logical_block, *physical_sector);
+	ret = memtable_put_active(&lsm->active_memtable,
+				  &lsm->immutable_memtable,
+				  &lsm->table_lock,
+				  lsm->memtable_threshold,
+				  logical_block, *physical_sector);
+	if (ret)
+		return ret;
+
+	zns_lsm_maybe_queue_flush(lsm);
+	return 0;
 }
 
 static void zns_lsm_free_sstables(struct zns_lsm *lsm)
@@ -233,9 +389,8 @@ static void zns_lsm_free_sstables(struct zns_lsm *lsm)
 }
 
 /*
- * Reserve the last zone of the underlying device for mapping metadata and hand
- * the allocator only the zones ahead of it. The allocator cannot tell this
- * apart from a slightly smaller device, so it needs no changes.
+ * Reserve the last zone of the underlying device for SSTables and hand the
+ * allocator only the zones ahead of it.
  */
 static int zns_lsm_init_metadata_zone(struct zns_lsm *lsm)
 {
@@ -281,6 +436,7 @@ int zns_engine_init(struct zns_engine *engine, struct block_device *lower_bdev,
 	mutex_init(&lsm->table_lock);
 	mutex_init(&lsm->sst_lock);
 	INIT_LIST_HEAD(&lsm->sstables);
+	INIT_WORK(&lsm->flush_work, zns_lsm_flush_worker);
 
 	ret = zns_zone_table_init(&lsm->zone_table, lower_bdev);
 	if (ret)
@@ -302,12 +458,17 @@ int zns_engine_init(struct zns_engine *engine, struct block_device *lower_bdev,
 		ret = -ENOMEM;
 		goto exit_allocator;
 	}
-	lsm->immutable_memtable = NULL;
+
+	lsm->flush_wq = alloc_ordered_workqueue("zns-lsm-flush", WQ_MEM_RECLAIM);
+	if (!lsm->flush_wq) {
+		ret = -ENOMEM;
+		goto free_memtable;
+	}
 
 	lsm->read_wq = alloc_workqueue("zns-lsm-read", WQ_MEM_RECLAIM, 0);
 	if (!lsm->read_wq) {
 		ret = -ENOMEM;
-		goto free_memtable;
+		goto destroy_flush_wq;
 	}
 
 	engine->private = lsm;
@@ -316,6 +477,8 @@ int zns_engine_init(struct zns_engine *engine, struct block_device *lower_bdev,
 	       (unsigned long long)lsm->meta_start);
 	return 0;
 
+destroy_flush_wq:
+	destroy_workqueue(lsm->flush_wq);
 free_memtable:
 	memtable_free(lsm->active_memtable);
 exit_allocator:
@@ -338,11 +501,13 @@ void zns_engine_exit(struct zns_engine *engine)
 	if (!lsm)
 		return;
 
-	/* Drain the queue before anything it references goes away. */
+	/* Drain both queues before anything they reference goes away. */
 	destroy_workqueue(lsm->read_wq);
+	destroy_workqueue(lsm->flush_wq);
 
 	memtable_free(lsm->active_memtable);
 	memtable_free(lsm->immutable_memtable);
+	memtable_free(lsm->flushing_memtable);
 	zns_lsm_free_sstables(lsm);
 	zns_allocator_exit(&lsm->allocator);
 	zns_zone_table_destroy(&lsm->zone_table);
@@ -395,8 +560,8 @@ int zns_engine_map(struct zns_engine *engine, struct bio *bio)
 void zns_engine_status(struct zns_engine *engine, char *result,
 		       unsigned int maxlen)
 {
+	unsigned int active, immutable, flushing, nr_sstables;
 	unsigned long long nr_sst_entries, meta_used;
-	unsigned int active, immutable, nr_sstables;
 	struct zns_lsm *lsm;
 	unsigned int sz = 0;
 
@@ -409,6 +574,7 @@ void zns_engine_status(struct zns_engine *engine, char *result,
 	mutex_lock(&lsm->table_lock);
 	active = memtable_size(lsm->active_memtable);
 	immutable = memtable_size(lsm->immutable_memtable);
+	flushing = memtable_size(lsm->flushing_memtable);
 	mutex_unlock(&lsm->table_lock);
 
 	mutex_lock(&lsm->sst_lock);
@@ -417,8 +583,9 @@ void zns_engine_status(struct zns_engine *engine, char *result,
 	meta_used = lsm->meta_wp - lsm->meta_start;
 	mutex_unlock(&lsm->sst_lock);
 
-	DMEMIT("lsm active=%u immutable=%u sstables=%u sst_entries=%llu meta_used=%llu",
-	       active, immutable, nr_sstables, nr_sst_entries, meta_used);
+	DMEMIT("lsm active=%u immutable=%u flushing=%u sstables=%u sst_entries=%llu meta_used=%llu",
+	       active, immutable, flushing, nr_sstables, nr_sst_entries,
+	       meta_used);
 }
 
 const char *zns_engine_name(void)
