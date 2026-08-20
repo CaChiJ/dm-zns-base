@@ -21,7 +21,7 @@ tmp_dir=$(mktemp -d)
 
 build_engine
 load_module
-reset_zone_zero
+reset_zones
 create_dm_target
 io_errors_save "$tmp_dir/io-errors"
 

@@ -209,6 +209,12 @@ run_case "when writes continue after a restart, a second restart returns them to
 	case_second_cycle
 
 # --- the superblock has to guard the geometry it was written with -----------
+#
+# The live target goes first, so that a refusal can only come from the
+# superblock and not from the device already being claimed.
+
+remove_dm_target
+ZNS_TARGET_CREATED=0
 
 case_length_mismatch_refused() {
 	local name="${TARGET_NAME}-short"

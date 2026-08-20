@@ -94,13 +94,6 @@ reset_zones() {
 		die "failed to reset the zones of $UNDERLYING"
 }
 
-# Reset only the first zone, for suites that write a single block and have no
-# reason to wipe the rest of the device.
-reset_zone_zero() {
-	blkzone reset -o 0 -c 1 "$UNDERLYING" ||
-		die "failed to reset zone 0 of $UNDERLYING"
-}
-
 # Value of one "key=value" field on the target's dmsetup status line.
 status_field() {
 	local key=$1
