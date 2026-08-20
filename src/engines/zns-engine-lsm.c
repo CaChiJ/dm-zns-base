@@ -391,6 +391,58 @@ static void zns_lsm_free_sstables(struct zns_lsm *lsm)
 	lsm->nr_sst_entries = 0;
 }
 
+/*
+ * Adopt the SSTables a previous instance left behind.
+ *
+ * The metadata zone is an append-only log, so walking it forward replays the
+ * order the flushes happened in, and list_add() leaves the newest at the head
+ * where the read path already expects the winner to be. Only headers are read,
+ * one block per SSTable, and each one says how far to jump to reach the next.
+ *
+ * The walk ends at the first sector that does not begin a complete SSTable,
+ * which is what a crash leaves at the tail. A read that fails outright is a
+ * different matter and is reported, because an unreadable log must not look
+ * like an empty one.
+ */
+static int zns_lsm_recover_sstables(struct zns_lsm *lsm)
+{
+	sector_t cursor = lsm->meta_start + ZNS_SST_BLOCK_SECTORS;
+	int ret;
+
+	while (cursor < lsm->meta_wp) {
+		struct zns_sstable *sst;
+
+		ret = zns_sst_load(lsm->lower_bdev, cursor, lsm->meta_wp, &sst);
+		if (ret == -EINVAL)
+			break;
+		if (ret)
+			return ret;
+
+		list_add(&sst->list, &lsm->sstables);
+		lsm->nr_sstables++;
+		lsm->nr_sst_entries += sst->nr_entries;
+		if (sst->seq >= lsm->next_sst_seq)
+			lsm->next_sst_seq = sst->seq + 1;
+
+		cursor += (sector_t)sst->nr_blocks * ZNS_SST_BLOCK_SECTORS;
+	}
+
+	/*
+	 * Everything below cursor is accounted for. Anything above it reached
+	 * the zone but cannot be read back, so it is dropped -- and appending
+	 * still resumes at meta_wp, because the write pointer has moved past
+	 * those sectors for good.
+	 */
+	if (cursor != lsm->meta_wp)
+		DMWARN("metadata zone %u: dropping %llu sectors that follow the last complete SSTable",
+		       lsm->super.meta_zone_id,
+		       (unsigned long long)(lsm->meta_wp - cursor));
+
+	DMINFO("lsm: recovered %u SSTable(s) holding %llu mappings",
+	       lsm->nr_sstables, lsm->nr_sst_entries);
+	return 0;
+}
+
 static bool zns_lsm_data_zones_dirty(const struct zns_lsm *lsm)
 {
 	unsigned int i;
@@ -455,7 +507,7 @@ static int zns_lsm_open_metadata(struct zns_lsm *lsm, sector_t logical_sectors)
 		/* Adopt the existing format, uuid included. */
 		lsm->super = on_disk;
 		lsm->meta_wp = meta->write_pointer;
-		return 0;
+		return zns_lsm_recover_sstables(lsm);
 	}
 
 	if (zns_lsm_data_zones_dirty(lsm))
@@ -504,14 +556,14 @@ int zns_engine_init(struct zns_engine *engine, struct block_device *lower_bdev,
 
 	ret = zns_lsm_open_metadata(lsm, logical_sectors);
 	if (ret)
-		goto destroy_zone_table;
+		goto free_sstables;
 
 	ret = zns_allocator_init_zoned(&lsm->allocator,
 				       lsm->zone_table.zones,
 				       lsm->zone_table.nr_zones - 1,
 				       sectors_per_block);
 	if (ret)
-		goto destroy_zone_table;
+		goto free_sstables;
 
 	lsm->active_memtable = memtable_create();
 	if (!lsm->active_memtable) {
@@ -543,7 +595,8 @@ free_memtable:
 	memtable_free(lsm->active_memtable);
 exit_allocator:
 	zns_allocator_exit(&lsm->allocator);
-destroy_zone_table:
+free_sstables:
+	zns_lsm_free_sstables(lsm);
 	zns_zone_table_destroy(&lsm->zone_table);
 free_lsm:
 	kfree(lsm);

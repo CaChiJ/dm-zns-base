@@ -318,6 +318,58 @@ free_sst:
 	return ret;
 }
 
+int zns_sst_load(struct block_device *bdev, sector_t sector, sector_t limit,
+		 struct zns_sstable **result)
+{
+	struct zns_sstable *sst;
+	void *block;
+	int ret;
+
+	if (!bdev || !result)
+		return -EINVAL;
+	*result = NULL;
+
+	if (sector >= limit)
+		return -EINVAL;
+
+	sst = kzalloc(sizeof(*sst), GFP_KERNEL);
+	if (!sst)
+		return -ENOMEM;
+
+	block = kmalloc(ZNS_SST_BLOCK_BYTES, GFP_KERNEL);
+	if (!block) {
+		ret = -ENOMEM;
+		goto free_sst;
+	}
+
+	ret = zns_meta_block_rw(bdev, sector, REQ_OP_READ, block);
+	if (ret)
+		goto free_block;
+
+	ret = zns_sst_decode_header(block, sst, NULL);
+	if (ret)
+		goto free_block;
+
+	/* Refuse a table whose payload never made it to the zone. */
+	if ((sector_t)sst->nr_blocks * ZNS_SST_BLOCK_SECTORS > limit - sector) {
+		ret = -EINVAL;
+		goto free_block;
+	}
+
+	INIT_LIST_HEAD(&sst->list);
+	sst->start_sector = sector;
+
+	kfree(block);
+	*result = sst;
+	return 0;
+
+free_block:
+	kfree(block);
+free_sst:
+	kfree(sst);
+	return ret;
+}
+
 static int zns_sst_read_payload_block(struct block_device *bdev,
 				      const struct zns_sstable *sst,
 				      unsigned int block_index, void *block,

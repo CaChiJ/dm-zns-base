@@ -98,6 +98,21 @@ int zns_sst_write(struct block_device *bdev, struct lsm_memtable *memtable,
 		  sector_t start_sector, sector_t end_sector, u64 seq,
 		  struct zns_sstable **result, sector_t *consumed);
 
+/*
+ * Read one SSTable header back and rebuild its in-memory index. limit is the
+ * first sector past everything that ever reached the zone.
+ *
+ * A header that claims more blocks than fit below limit is refused. That is
+ * what a crash leaves behind: the header decodes perfectly well, but the
+ * payload behind it was never written, and a lookup into it would search
+ * blocks holding whatever the media happens to contain.
+ *
+ * Returns 0, -EINVAL when the sector does not begin a complete SSTable, or an
+ * I/O error.
+ */
+int zns_sst_load(struct block_device *bdev, sector_t sector, sector_t limit,
+		 struct zns_sstable **result);
+
 /* Look one mapping up on disk. Returns 0, -ENODATA, or an I/O error. */
 int zns_sst_lookup(struct block_device *bdev, const struct zns_sstable *sst,
 		   sector_t logical_block, sector_t *physical_sector);
