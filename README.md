@@ -16,8 +16,8 @@ Linux 게스트가 준비되면 동일:
 
 ```bash
 sudo bash scripts/nullblk-up.sh   # /dev/nullb0 (zoned, 2GB, 64MB × 32 zones)
-cd src && make && cd ..
-sudo bash scripts/test-basic.sh   # ALL CHECKS PASSED 까지
+sudo ./test.sh                    # 전체 테스트 (빌드까지 알아서 한다)
+./test.sh --list                  # 테스트 목록
 ```
 
 ## 문서
@@ -38,7 +38,9 @@ sudo bash scripts/test-basic.sh   # ALL CHECKS PASSED 까지
 ```
 dm-zns-base/
 ├── src/         커널 모듈 소스 + Makefile
-├── scripts/     nullblk 셋업, 자동 테스트
+├── tests/       테스트 suite (lib / unit / integration / acceptance)
+├── test.sh      테스트 엔트리포인트 → tests/run.sh
+├── scripts/     nullblk 셋업, 수동 실험용 빌드 스크립트
 ├── docs/        셋업·마일스톤·참고자료
 ├── Vagrantfile  Windows용 자동 VM
 └── provision.sh
