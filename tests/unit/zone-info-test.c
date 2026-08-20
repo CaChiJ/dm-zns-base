@@ -6,7 +6,9 @@
 #include <linux/file.h>
 #include <linux/module.h>
 
-#include "../src/zns-zone.c"
+#include "../../src/zns-zone.c"
+
+#include "zns-test.h"
 
 #define ZONE_TEST_DEVICE "/dev/nullb0"
 
@@ -34,7 +36,7 @@ static int zone_info_validate(const struct zns_zone_table *table)
 	return 0;
 }
 
-static int __init zone_info_test_init(void)
+static int zone_info_test_discovery(void)
 {
 	struct zns_zone_table table;
 	struct block_device *bdev;
@@ -77,11 +79,18 @@ out_destroy:
 out_fput:
 	fput(bdev_file);
 
-	if (ret)
-		pr_err("zns zone info test: FAIL (%d)\n", ret);
-	else
-		pr_info("zns zone info test: PASS\n");
 	return ret;
+}
+
+static const struct zns_test_case zone_info_cases[] = {
+	ZNS_TEST_CASE(zone_info_test_discovery,
+		      "when the underlying device is opened, its zone table is discovered and consistent"),
+};
+
+static int __init zone_info_test_init(void)
+{
+	return zns_test_run("zone-info", zone_info_cases,
+			    ARRAY_SIZE(zone_info_cases));
 }
 
 static void __exit zone_info_test_exit(void)

@@ -8,7 +8,9 @@
 #include <linux/module.h>
 #include <linux/slab.h>
 
-#include "../src/zns-allocator.c"
+#include "../../src/zns-allocator.c"
+
+#include "zns-test.h"
 
 #define TEST_BLOCK_SECTORS 8
 #define TEST_TOTAL_BLOCKS  128
@@ -461,44 +463,31 @@ free_results:
 	return ret;
 }
 
+static const struct zns_test_case allocator_cases[] = {
+	ZNS_TEST_CASE(allocator_test_sequential,
+		      "when blocks are allocated in order, the allocator returns 0, 8, 16 and on"),
+	ZNS_TEST_CASE(allocator_test_enospc,
+		      "when every block is used, the next allocation reports -ENOSPC"),
+	ZNS_TEST_CASE(allocator_test_zoned_boundaries,
+		      "when a zone reaches capacity, allocation moves on to the next zone"),
+	ZNS_TEST_CASE(allocator_test_zoned_partial_capacity,
+		      "when capacity is not a block multiple, the partial tail is left unused"),
+	ZNS_TEST_CASE(allocator_test_zoned_current_wp,
+		      "when a zone is already written, allocation resumes at its write pointer"),
+	ZNS_TEST_CASE(allocator_test_zoned_skips_unwritable,
+		      "when a zone is full, read-only, or offline, the allocator skips it"),
+	ZNS_TEST_CASE(allocator_test_zoned_invalid_init,
+		      "when the zone geometry is invalid, initialization is refused"),
+	ZNS_TEST_CASE(allocator_test_concurrent,
+		      "when two kthreads allocate at once, no linear block is handed out twice"),
+	ZNS_TEST_CASE(allocator_test_zoned_concurrent,
+		      "when two kthreads allocate at once, zoned blocks stay inside capacity"),
+};
+
 static int __init allocator_test_init(void)
 {
-	int ret;
-
-	ret = allocator_test_sequential();
-	if (ret)
-		goto fail;
-	ret = allocator_test_enospc();
-	if (ret)
-		goto fail;
-	ret = allocator_test_zoned_boundaries();
-	if (ret)
-		goto fail;
-	ret = allocator_test_zoned_partial_capacity();
-	if (ret)
-		goto fail;
-	ret = allocator_test_zoned_current_wp();
-	if (ret)
-		goto fail;
-	ret = allocator_test_zoned_skips_unwritable();
-	if (ret)
-		goto fail;
-	ret = allocator_test_zoned_invalid_init();
-	if (ret)
-		goto fail;
-	ret = allocator_test_concurrent();
-	if (ret)
-		goto fail;
-	ret = allocator_test_zoned_concurrent();
-	if (ret)
-		goto fail;
-
-	pr_info("zns allocator test: PASS\n");
-	return 0;
-
-fail:
-	pr_err("zns allocator test: FAIL (%d)\n", ret);
-	return ret;
+	return zns_test_run("allocator", allocator_cases,
+			    ARRAY_SIZE(allocator_cases));
 }
 
 static void __exit allocator_test_exit(void)

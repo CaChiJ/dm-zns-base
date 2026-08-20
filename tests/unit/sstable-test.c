@@ -5,8 +5,10 @@
 #include <linux/module.h>
 #include <linux/slab.h>
 
-#include "../src/lsm-memtable.c"
-#include "../src/lsm-sstable.c"
+#include "../../src/lsm-memtable.c"
+#include "../../src/lsm-sstable.c"
+
+#include "zns-test.h"
 
 #define SST_TEST_SEQ 7
 
@@ -230,32 +232,21 @@ out:
 	return ret;
 }
 
+static const struct zns_test_case sstable_cases[] = {
+	ZNS_TEST_CASE(sstable_test_block_geometry,
+		      "when entries fill a 4 KiB block, 256 fit and the block count rounds up"),
+	ZNS_TEST_CASE(sstable_test_header_roundtrip,
+		      "when a header is encoded, it decodes back and a zero block is not a header"),
+	ZNS_TEST_CASE(sstable_test_block_find,
+		      "when a block is searched, hits, misses, and a padded tail all behave"),
+	ZNS_TEST_CASE(sstable_test_memtable_scan,
+		      "when a memtable is scanned, its order and key range match the tree"),
+};
+
 static int __init sstable_test_init(void)
 {
-	int ret;
-
-	ret = sstable_test_block_geometry();
-	if (ret)
-		goto fail;
-
-	ret = sstable_test_header_roundtrip();
-	if (ret)
-		goto fail;
-
-	ret = sstable_test_block_find();
-	if (ret)
-		goto fail;
-
-	ret = sstable_test_memtable_scan();
-	if (ret)
-		goto fail;
-
-	pr_info("zns sstable test: PASS\n");
-	return 0;
-
-fail:
-	pr_err("zns sstable test: FAIL (%d)\n", ret);
-	return ret;
+	return zns_test_run("sstable", sstable_cases,
+			    ARRAY_SIZE(sstable_cases));
 }
 
 static void __exit sstable_test_exit(void)
