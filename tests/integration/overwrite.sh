@@ -43,7 +43,7 @@ case_crc_read_after_write() {
 case_crc_after_repeated_loops() {
 	run_fio "$tmp_dir/loops.log" overwrite-loops \
 		--rw=randwrite --bs=4k --size="$WORKLOAD_SIZE" --iodepth=8 \
-		--loops=3 --verify=crc32c --verify_fatal=1
+		--loops=3 --verify=crc32c --verify_fatal=1 --verify_state_save=0
 	detail "loops=3"
 }
 
