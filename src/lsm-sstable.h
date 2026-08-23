@@ -62,7 +62,7 @@ struct zns_sstable {
  * reserved zone.
  */
 int zns_meta_block_rw(struct block_device *bdev, sector_t sector,
-		      blk_opf_t opf, void *buffer);
+		      unsigned int opf, void *buffer);
 
 /* Total blocks, header included, needed to hold nr_entries mappings. */
 unsigned int zns_sst_nr_blocks(u32 nr_entries);

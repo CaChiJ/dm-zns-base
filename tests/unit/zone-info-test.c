@@ -5,12 +5,55 @@
 #include <linux/errno.h>
 #include <linux/file.h>
 #include <linux/module.h>
+#include <linux/version.h>
 
 #include "../../src/zns-zone.c"
 
 #include "zns-test.h"
 
 #define ZONE_TEST_DEVICE "/dev/nullb0"
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
+struct zone_info_bdev_handle {
+	struct file *file;
+	struct block_device *bdev;
+};
+
+static int zone_info_open_bdev(struct zone_info_bdev_handle *handle)
+{
+	handle->file = bdev_file_open_by_path(ZONE_TEST_DEVICE, BLK_OPEN_READ,
+					      NULL, NULL);
+	if (IS_ERR(handle->file))
+		return PTR_ERR(handle->file);
+
+	handle->bdev = file_bdev(handle->file);
+	return 0;
+}
+
+static void zone_info_close_bdev(struct zone_info_bdev_handle *handle)
+{
+	fput(handle->file);
+}
+#else
+struct zone_info_bdev_handle {
+	struct block_device *bdev;
+};
+
+static int zone_info_open_bdev(struct zone_info_bdev_handle *handle)
+{
+	handle->bdev = blkdev_get_by_path(ZONE_TEST_DEVICE, FMODE_READ,
+					  zone_info_open_bdev);
+	if (IS_ERR(handle->bdev))
+		return PTR_ERR(handle->bdev);
+
+	return 0;
+}
+
+static void zone_info_close_bdev(struct zone_info_bdev_handle *handle)
+{
+	blkdev_put(handle->bdev, FMODE_READ);
+}
+#endif
 
 static int zone_info_validate(const struct zns_zone_table *table)
 {
@@ -39,24 +82,20 @@ static int zone_info_validate(const struct zns_zone_table *table)
 static int zone_info_test_discovery(void)
 {
 	struct zns_zone_table table;
-	struct block_device *bdev;
+	struct zone_info_bdev_handle handle;
 	struct zns_zone *zone;
-	struct file *bdev_file;
 	int ret;
 
-	bdev_file = bdev_file_open_by_path(ZONE_TEST_DEVICE, BLK_OPEN_READ,
-					   NULL, NULL);
-	if (IS_ERR(bdev_file)) {
-		ret = PTR_ERR(bdev_file);
+	ret = zone_info_open_bdev(&handle);
+	if (ret) {
 		pr_err("zns zone info test: cannot open %s (%d)\n",
 		       ZONE_TEST_DEVICE, ret);
 		return ret;
 	}
-	bdev = file_bdev(bdev_file);
 
-	ret = zns_zone_table_init(&table, bdev);
+	ret = zns_zone_table_init(&table, handle.bdev);
 	if (ret)
-		goto out_fput;
+		goto out_close;
 
 	ret = zone_info_validate(&table);
 	if (ret)
@@ -76,8 +115,8 @@ out_destroy:
 	zns_zone_table_destroy(&table);
 	if (!ret && (table.zones || table.nr_zones))
 		ret = -EINVAL;
-out_fput:
-	fput(bdev_file);
+out_close:
+	zone_info_close_bdev(&handle);
 
 	return ret;
 }

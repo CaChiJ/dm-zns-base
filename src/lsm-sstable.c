@@ -16,6 +16,7 @@
 #include <linux/errno.h>
 #include <linux/slab.h>
 #include <linux/string.h>
+#include <linux/version.h>
 
 #include "lsm-memtable.h"
 #include "lsm-sstable.h"
@@ -121,13 +122,31 @@ int zns_sst_block_find(const void *block, unsigned int nr_in_block,
 	return -ENODATA;
 }
 
+static struct bio *zns_meta_bio_alloc(struct block_device *bdev,
+				      unsigned int opf)
+{
+	struct bio *bio;
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
+	bio = bio_alloc(bdev, 1, opf, GFP_NOIO);
+#else
+	bio = bio_alloc(GFP_NOIO, 1);
+	if (bio) {
+		bio_set_dev(bio, bdev);
+		bio->bi_opf = opf;
+	}
+#endif
+
+	return bio;
+}
+
 int zns_meta_block_rw(struct block_device *bdev, sector_t sector,
-		      blk_opf_t opf, void *buffer)
+		      unsigned int opf, void *buffer)
 {
 	struct bio *bio;
 	int ret;
 
-	bio = bio_alloc(bdev, 1, opf, GFP_NOIO);
+	bio = zns_meta_bio_alloc(bdev, opf);
 	if (!bio)
 		return -ENOMEM;
 
