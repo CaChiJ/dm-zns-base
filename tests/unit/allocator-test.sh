@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# In-kernel unit tests for the physical append allocator.
+set -euo pipefail
+
+TESTS_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+# shellcheck source=../lib/init.sh
+source "$TESTS_DIR/lib/init.sh"
+
+report_init "unit/allocator"
+require_root
+run_kernel_test_module allocator-test allocator_test
+report_summary

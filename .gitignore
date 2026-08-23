@@ -10,6 +10,11 @@
 modules.order
 Module.symvers
 
+# Test run artifacts
+# fio writes its verify state into the working directory unless a job passes
+# --verify_state_save=0. Every suite does, but a hand-run fio still would not.
+*-verify.state
+
 # Editor / OS
 .vscode/
 .idea/

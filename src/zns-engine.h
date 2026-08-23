@@ -23,6 +23,10 @@ void zns_engine_exit(struct zns_engine *engine);
 /* DM .map()에서 받은 bio를 remap, 직접 완료, 또는 kill 중 하나로 처리한다. */
 int zns_engine_map(struct zns_engine *engine, struct bio *bio);
 
+/* dmsetup status의 INFO 줄에 엔진별 상태를 채운다. DMEMIT 규약을 따른다. */
+void zns_engine_status(struct zns_engine *engine, char *result,
+		       unsigned int maxlen);
+
 /* 현재 빌드에 링크된 engine 이름을 정적 문자열로 반환한다. */
 const char *zns_engine_name(void);
 

@@ -6,7 +6,9 @@
 #include <linux/kthread.h>
 #include <linux/module.h>
 
-#include "../src/lsm-memtable.c"
+#include "../../src/lsm-memtable.c"
+
+#include "zns-test.h"
 
 #define FREEZE_TEST_THRESHOLD 32
 #define FREEZE_TEST_WORKERS 2
@@ -846,72 +848,41 @@ out:
 	return ret;
 }
 
+static const struct zns_test_case memtable_cases[] = {
+	ZNS_TEST_CASE(memtable_test_heap_lifecycle,
+		      "when a memtable heap is created, it starts empty and serves put and lookup"),
+	ZNS_TEST_CASE(memtable_test_compact_empty,
+		      "when two empty memtables are compacted, the result is empty"),
+	ZNS_TEST_CASE(memtable_test_compact_mappings,
+		      "when memtables are compacted, newer mappings win and the inputs stay unchanged"),
+	ZNS_TEST_CASE(memtable_test_compact_errors,
+		      "when compaction gets bad arguments or fails midway, partial results are freed"),
+	ZNS_TEST_CASE(memtable_test_threshold_freeze,
+		      "when the unique key threshold is reached, the active memtable freezes"),
+	ZNS_TEST_CASE(memtable_test_threshold_compaction_failures,
+		      "when maintenance fails, the mapping just written still survives"),
+	ZNS_TEST_CASE(memtable_test_active_immutable_lookup,
+		      "when a key lives in both generations, active wins and immutable is the fallback"),
+	ZNS_TEST_CASE(memtable_test_threshold_freeze_concurrent,
+		      "when two writers cross the threshold together, every mapping survives"),
+	ZNS_TEST_CASE(memtable_test_freeze,
+		      "when freeze is explicit, the generation pointers swap and a second freeze is refused"),
+	ZNS_TEST_CASE(memtable_test_freeze_allocation_failure,
+		      "when freeze cannot allocate, the memtable is left untouched"),
+	ZNS_TEST_CASE(memtable_test_insert_lookup_update,
+		      "when mappings are inserted and updated, lookups return the newest value"),
+	ZNS_TEST_CASE(memtable_test_missing,
+		      "when a key was never inserted, lookup reports it as missing"),
+	ZNS_TEST_CASE(memtable_test_unordered_and_duplicate,
+		      "when keys arrive unordered or duplicated, the tree stays sorted and unique"),
+	ZNS_TEST_CASE(memtable_test_latest_mapping,
+		      "when a key is rewritten, the latest physical mapping is kept"),
+};
+
 static int __init memtable_test_init(void)
 {
-	int ret;
-
-	ret = memtable_test_heap_lifecycle();
-	if (ret)
-		goto fail;
-
-	ret = memtable_test_compact_empty();
-	if (ret)
-		goto fail;
-
-	ret = memtable_test_compact_mappings();
-	if (ret)
-		goto fail;
-
-	ret = memtable_test_compact_errors();
-	if (ret)
-		goto fail;
-
-	ret = memtable_test_threshold_freeze();
-	if (ret)
-		goto fail;
-
-	ret = memtable_test_threshold_compaction_failures();
-	if (ret)
-		goto fail;
-
-	ret = memtable_test_active_immutable_lookup();
-	if (ret)
-		goto fail;
-
-	ret = memtable_test_threshold_freeze_concurrent();
-	if (ret)
-		goto fail;
-
-	ret = memtable_test_freeze();
-	if (ret)
-		goto fail;
-
-	ret = memtable_test_freeze_allocation_failure();
-	if (ret)
-		goto fail;
-
-	ret = memtable_test_insert_lookup_update();
-	if (ret)
-		goto fail;
-
-	ret = memtable_test_missing();
-	if (ret)
-		goto fail;
-
-	ret = memtable_test_unordered_and_duplicate();
-	if (ret)
-		goto fail;
-
-	ret = memtable_test_latest_mapping();
-	if (ret)
-		goto fail;
-
-	pr_info("zns memtable test: PASS\n");
-	return 0;
-
-fail:
-	pr_err("zns memtable test: FAIL (%d)\n", ret);
-	return ret;
+	return zns_test_run("memtable", memtable_cases,
+			    ARRAY_SIZE(memtable_cases));
 }
 
 static void __exit memtable_test_exit(void)

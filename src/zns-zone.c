@@ -2,6 +2,7 @@
 
 #include <linux/blkdev.h>
 #include <linux/errno.h>
+#include <linux/version.h>
 #include <linux/slab.h>
 
 #include "zns-zone.h"
@@ -15,6 +16,15 @@ static bool zns_zone_is_active(u8 condition)
 	return condition == BLK_ZONE_COND_IMP_OPEN ||
 	       condition == BLK_ZONE_COND_EXP_OPEN ||
 	       condition == BLK_ZONE_COND_CLOSED;
+}
+
+static unsigned int zns_bdev_nr_zones(struct block_device *bdev)
+{
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
+	return bdev_nr_zones(bdev);
+#else
+	return blkdev_nr_zones(bdev->bd_disk);
+#endif
 }
 
 static int zns_zone_report_cb(struct blk_zone *reported,
@@ -54,7 +64,7 @@ int zns_zone_table_init(struct zns_zone_table *table,
 	if (!bdev_is_zoned(bdev))
 		return -ENODEV;
 
-	nr_zones = bdev_nr_zones(bdev);
+	nr_zones = zns_bdev_nr_zones(bdev);
 	if (!nr_zones)
 		return -ENODEV;
 
