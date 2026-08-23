@@ -1,4 +1,4 @@
-# dm-zns-base ?
+# dm-zns-base
 
 졸업프로젝트 *"엣지 컴퓨팅을 위한 동적 플랫폼(Apache Kafka)과 ZNS(Zoned Namespace) SSD 호환을 위한 리눅스 커널 블록 계층 개발"* 의 학생용 base repo.
 
