@@ -14,6 +14,8 @@ Module.symvers
 # fio writes its verify state into the working directory unless a job passes
 # --verify_state_save=0. Every suite does, but a hand-run fio still would not.
 *-verify.state
+/tests/support/tools/versioned-io
+/tests/support/tools/byte-io
 
 # Editor / OS
 .vscode/

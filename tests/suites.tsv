@@ -21,4 +21,7 @@ extended   standard   integration/concurrency-lifecycle.sh
 extended   standard   integration/data-exhaustion.sh
 extended   standard   integration/metadata-exhaustion.sh
 extended   standard   integration/operation-contract.sh
+extended   standard   integration/payload-size-matrix.sh
+extended   standard   integration/request-size-matrix.sh
+extended   standard   integration/subblock-write.sh
 extended   standard   integration/zone-capacity.sh
