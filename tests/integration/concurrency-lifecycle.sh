@@ -108,8 +108,34 @@ case_repeated_recovery() {
 	detail "cycles=$LIFECYCLE_CYCLES"
 }
 
+case_overlapping_partial_writers() {
+	local lba=100
+	local i pid
+	local pids=()
+
+	make_zero_file "$tmp_dir/overlap-base.bin"
+	write_block "$tmp_dir/overlap-base.bin" "$lba"
+	: >"$tmp_dir/overlap-expected.bin"
+	for ((i = 0; i < 8; i++)); do
+		head -c 512 /dev/zero | tr '\0' "$(printf '%x' "$i")" \
+			>"$tmp_dir/overlap-$i.bin"
+		cat "$tmp_dir/overlap-$i.bin" >>"$tmp_dir/overlap-expected.bin"
+		dd if="$tmp_dir/overlap-$i.bin" of="$DM_DEV" bs=512 \
+			seek=$((lba * 8 + i)) count=1 oflag=direct \
+			conv=notrunc status=none &
+		pids+=("$!")
+	done
+	for pid in "${pids[@]}"; do
+		wait "$pid" || fail "an overlapping partial writer failed"
+	done
+	assert_block "$tmp_dir/overlap-expected.bin" "$lba"
+	detail "writers=8 sectors=8 logical_block=$lba"
+}
+
 run_case "when four disjoint writers run, CRC verification and status polling both complete" \
 	case_parallel_writers
+run_case "when eight writers update one logical block, no sector update is lost" \
+	case_overlapping_partial_writers
 run_case "when targets are repeatedly recreated, every prior cycle remains readable" \
 	case_repeated_recovery
 run_case "when the short stress gate finishes, no kernel I/O errors appear" \

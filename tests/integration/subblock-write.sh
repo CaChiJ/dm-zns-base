@@ -64,6 +64,24 @@ case_partial_overwrite_preserves_neighbors() {
 	detail "offset=1KiB length=1KiB"
 }
 
+case_unmapped_partial_write_zero_fills_neighbors() {
+	local lba=384
+	local baseline="$tmp_dir/io-errors-unmapped"
+
+	make_zero_file "$tmp_dir/unmapped-expected.bin"
+	head -c 512 /dev/zero | tr '\0' E >"$tmp_dir/unmapped-sector.bin"
+	dd if="$tmp_dir/unmapped-sector.bin" of="$tmp_dir/unmapped-expected.bin" \
+		bs=512 seek=5 count=1 conv=notrunc status=none
+
+	io_errors_save "$baseline"
+	dd if="$tmp_dir/unmapped-sector.bin" of="$DM_DEV" bs=512 \
+		seek=$((lba * 8 + 5)) count=1 oflag=direct conv=notrunc status=none ||
+		fail "failed to write one sector into an unmapped logical block"
+	assert_block "$tmp_dir/unmapped-expected.bin" "$lba"
+	assert_no_new_io_errors "$baseline"
+	detail "offset=2.5KiB length=512B zero_neighbors=3584B"
+}
+
 case_cross_block_write_preserves_both_blocks() {
 	local lba=256
 	local baseline="$tmp_dir/io-errors-cross-block"
@@ -97,8 +115,16 @@ run_case "when requests are 1 KiB, randwrites complete and verify" \
 	case_subblock_write 1k
 run_case "when requests are 2 KiB, randwrites complete and verify" \
 	case_subblock_write 2k
+run_case "when requests are 1536 B, randwrites complete and verify" \
+	case_subblock_write 1536 8M
+run_case "when requests are 2560 B, randwrites complete and verify" \
+	case_subblock_write 2560 8M
+run_case "when requests are 3584 B, randwrites complete and verify" \
+	case_subblock_write 3584 8M
 run_case "when the middle 1 KiB is overwritten, both neighboring ranges are preserved" \
 	case_partial_overwrite_preserves_neighbors
+run_case "when one sector is written to an unmapped block, every neighbor remains zero" \
+	case_unmapped_partial_write_zero_fills_neighbors
 run_case "when 1 KiB crosses a 4 KiB boundary, both logical blocks remain intact" \
 	case_cross_block_write_preserves_both_blocks
 

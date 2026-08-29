@@ -20,6 +20,7 @@ REWRITE_LBA=${REWRITE_LBA:-2048}
 LATE_LBA=${LATE_LBA:-3072}
 FILLER_LBA=${FILLER_LBA:-4096}		# only there to force a freeze
 UNWRITTEN_LBA=${UNWRITTEN_LBA:-8192}
+PARTIAL_LBA=${PARTIAL_LBA:-3500}
 
 # One 4 KiB block, in 512-byte sectors.
 BLOCK_SECTORS=8
@@ -206,6 +207,29 @@ case_second_cycle() {
 
 run_case "when writes continue after a restart, a second restart returns them too" \
 	case_second_cycle
+
+# --- a partial overwrite of an SSTable mapping must survive recovery --------
+
+make_pattern_file "$tmp_dir/partial-base.bin" P
+head -c 512 /dev/zero | tr '\0' Q >"$tmp_dir/partial-sector.bin"
+cp "$tmp_dir/partial-base.bin" "$tmp_dir/partial-expected.bin"
+dd if="$tmp_dir/partial-sector.bin" of="$tmp_dir/partial-expected.bin" \
+	bs=512 seek=3 count=1 conv=notrunc status=none
+
+write_range "$tmp_dir/partial-base.bin" "$PARTIAL_LBA" 1
+recreate_dm_target
+dd if="$tmp_dir/partial-sector.bin" of="$DM_DEV" bs=512 \
+	seek=$((PARTIAL_LBA * BLOCK_SECTORS + 3)) count=1 \
+	oflag=direct conv=notrunc status=none ||
+	die "failed to partially overwrite an SSTable-backed mapping"
+recreate_dm_target
+
+case_partial_sstable_overwrite_survives() {
+	assert_block "$tmp_dir/partial-expected.bin" "$PARTIAL_LBA"
+}
+
+run_case "when an SSTable-backed block is partially overwritten, restart preserves every byte" \
+	case_partial_sstable_overwrite_survives
 
 # --- the superblock has to guard the geometry it was written with -----------
 #
