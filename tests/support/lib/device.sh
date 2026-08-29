@@ -69,7 +69,14 @@ create_dm_target() {
 
 	physical_sectors=$(blockdev --getsz "$UNDERLYING") ||
 		die "failed to read the sector count of $UNDERLYING"
-	[ -n "$sectors" ] || sectors=$physical_sectors
+	if [ -z "$sectors" ]; then
+		if [ "$ZNS_ENGINE" = lsm ]; then
+			sectors=$(data_zone_capacity_sectors) ||
+				die "failed to calculate the LSM data-zone capacity"
+		else
+			sectors=$physical_sectors
+		fi
+	fi
 	[[ $sectors =~ ^[0-9]+$ ]] && [ "$sectors" -gt 0 ] ||
 		die "invalid DM target size: $sectors sectors"
 	[ "$sectors" -le "$physical_sectors" ] ||
@@ -124,6 +131,7 @@ reset_zones() {
 # zone for its superblock and SSTables, so its capacity is deliberately omitted.
 data_zone_capacity_sectors() {
 	local nr_zones zone_sectors zone_id capacity total=0
+	local sectors_per_block=8
 
 	nr_zones=$(underlying_attr nr_zones) || return 1
 	zone_sectors=$(underlying_attr chunk_sectors) || return 1
@@ -133,9 +141,12 @@ data_zone_capacity_sectors() {
 		capacity=$(zone_capacity $((zone_id * zone_sectors))) || return 1
 		[ -n "$capacity" ] || return 1
 		capacity=$(printf '%u' "$capacity") || return 1
+		# The allocator cannot place a 4 KiB block in a shorter zone tail.
+		capacity=$((capacity - capacity % sectors_per_block))
 		total=$((total + capacity))
 	done
 
+	[ "$total" -gt 0 ] || return 1
 	printf '%u\n' "$total"
 }
 

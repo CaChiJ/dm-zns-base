@@ -23,7 +23,8 @@
 
 unsigned int zns_sst_nr_blocks(u32 nr_entries)
 {
-	return 1 + DIV_ROUND_UP(nr_entries, ZNS_SST_ENTRIES_PER_BLOCK);
+	return 1 + nr_entries / ZNS_SST_ENTRIES_PER_BLOCK +
+	       !!(nr_entries % ZNS_SST_ENTRIES_PER_BLOCK);
 }
 
 unsigned int zns_sst_entries_in_block(u32 nr_entries, unsigned int block_index)
@@ -342,6 +343,12 @@ int zns_sst_load(struct block_device *bdev, sector_t sector, sector_t limit,
 {
 	struct zns_sstable *sst;
 	void *block;
+	u32 expected_crc;
+	u32 payload_crc = 0;
+	sector_t first_key = 0;
+	sector_t previous_key = 0;
+	unsigned int block_index;
+	u32 seen = 0;
 	int ret;
 
 	if (!bdev || !result)
@@ -365,13 +372,58 @@ int zns_sst_load(struct block_device *bdev, sector_t sector, sector_t limit,
 	if (ret)
 		goto free_block;
 
-	ret = zns_sst_decode_header(block, sst, NULL);
-	if (ret)
+	ret = zns_sst_decode_header(block, sst, &expected_crc);
+	if (ret) {
+		ret = -EUCLEAN;
 		goto free_block;
+	}
 
-	/* Refuse a table whose payload never made it to the zone. */
+	/* An otherwise valid header beyond the WP is an incomplete tail. */
 	if ((sector_t)sst->nr_blocks * ZNS_SST_BLOCK_SECTORS > limit - sector) {
-		ret = -EINVAL;
+		ret = -ENODATA;
+		goto free_block;
+	}
+
+	/*
+	 * A later retry can push the zone WP past a torn table, so bounds alone
+	 * cannot prove that the claimed payload belongs to this header. Verify the
+	 * checksum and the sorted-key structure before publishing the table.
+	 */
+	for (block_index = 0; block_index + 1 < sst->nr_blocks;
+	     block_index++) {
+		const struct zns_sst_disk_entry *entries = block;
+		unsigned int nr_in_block;
+		unsigned int i;
+
+		ret = zns_meta_block_rw(
+			bdev,
+			sector + (sector_t)(block_index + 1) *
+				 ZNS_SST_BLOCK_SECTORS,
+			REQ_OP_READ, block);
+		if (ret)
+			goto free_block;
+
+		payload_crc = crc32_le(payload_crc, block,
+				       ZNS_SST_BLOCK_BYTES);
+		nr_in_block = zns_sst_entries_in_block(sst->nr_entries,
+						     block_index);
+		for (i = 0; i < nr_in_block; i++) {
+			sector_t key = le64_to_cpu(entries[i].logical_block);
+
+			if (seen && key <= previous_key) {
+				ret = -EUCLEAN;
+				goto free_block;
+			}
+			if (!seen)
+				first_key = key;
+			previous_key = key;
+			seen++;
+		}
+	}
+
+	if (payload_crc != expected_crc || seen != sst->nr_entries ||
+	    first_key != sst->min_key || previous_key != sst->max_key) {
+		ret = -EUCLEAN;
 		goto free_block;
 	}
 

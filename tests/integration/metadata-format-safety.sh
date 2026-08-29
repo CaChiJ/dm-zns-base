@@ -24,10 +24,30 @@ tmp_dir=$(mktemp -d)
 build_engine
 load_module
 
-device_sectors=$(blockdev --getsz "$UNDERLYING") ||
-	die "failed to read the sector count of $UNDERLYING"
+logical_sectors=$(data_zone_capacity_sectors) ||
+	die "failed to calculate the LSM data-zone capacity"
+physical_sectors=$(blockdev --getsz "$UNDERLYING") ||
+	die "failed to read the lower-device sector count"
 make_pattern_file "$tmp_dir/data.bin" D
 make_pattern_file "$tmp_dir/foreign.bin" F
+
+case_oversized_target_is_refused() {
+	local name="$TARGET_NAME"
+	local meta_wp_before meta_wp_after
+
+	meta_wp_before=$(meta_zone_write_pointer) ||
+		fail "could not read the empty metadata write pointer"
+	if try_create_dm_target "$name" "$physical_sectors"; then
+		dmsetup remove --retry "$name" 2>/dev/null ||
+			fail "the oversized target was accepted and could not be removed"
+		fail "a target larger than the usable data zones was accepted"
+	fi
+	meta_wp_after=$(meta_zone_write_pointer) ||
+		fail "could not re-read the metadata write pointer"
+	assert_eq "$meta_wp_after" "$meta_wp_before" \
+		"rejecting an oversized target modified the metadata zone"
+	detail "requested=$physical_sectors usable=$logical_sectors"
+}
 
 case_clean_media_is_accepted() {
 	local name="$TARGET_NAME"
@@ -35,13 +55,15 @@ case_clean_media_is_accepted() {
 	if dmsetup info "$name" >/dev/null 2>&1; then
 		fail "the probe target already exists before the control case"
 	fi
-	try_create_dm_target "$name" "$device_sectors" ||
+	try_create_dm_target "$name" "$logical_sectors" ||
 		fail "a clean device was refused, so the rejection cases would prove nothing"
 	dmsetup remove --retry "$name" 2>/dev/null ||
 		fail "the clean control target could not be removed"
 }
 
 reset_zones
+run_case "when target length includes the reserved metadata zone, creation is refused" \
+	case_oversized_target_is_refused
 run_case "when both data and metadata zones are empty, the target is accepted" \
 	case_clean_media_is_accepted
 remove_dm_target
@@ -72,7 +94,7 @@ case_dirty_data_without_metadata_is_refused() {
 	if dmsetup info "$name" >/dev/null 2>&1; then
 		fail "the probe target already exists before the dirty-data case"
 	fi
-	if try_create_dm_target "$name" "$device_sectors"; then
+	if try_create_dm_target "$name" "$logical_sectors"; then
 		dmsetup remove --retry "$name" 2>/dev/null ||
 			fail "the unsafe target was accepted and could not be removed"
 		fail "a target was created even though data exists without metadata"
@@ -109,7 +131,7 @@ case_foreign_metadata_is_refused() {
 	if dmsetup info "$name" >/dev/null 2>&1; then
 		fail "the probe target already exists before the foreign-metadata case"
 	fi
-	if try_create_dm_target "$name" "$device_sectors"; then
+	if try_create_dm_target "$name" "$logical_sectors"; then
 		dmsetup remove --retry "$name" 2>/dev/null ||
 			fail "the foreign-metadata target was accepted and could not be removed"
 		fail "a foreign metadata block was accepted as a superblock"

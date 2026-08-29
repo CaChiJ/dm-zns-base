@@ -62,7 +62,7 @@ wait_for_torn_flush() {
 	die "the injected SSTable flush did not stop at $expected_wp: $(dmsetup status "$TARGET_NAME")"
 }
 
-wait_for_retry() {
+wait_for_metadata_disable() {
 	local expected_wp=$1
 	local deadline=$((SECONDS + FLUSH_TIMEOUT))
 	local wp
@@ -71,22 +71,19 @@ wait_for_retry() {
 		wp=$(meta_zone_write_pointer) ||
 			die "could not read the metadata write pointer"
 		if [ "$(status_field active)" -eq 1 ] &&
-		   [ "$(status_field flushing)" -eq 0 ] &&
+		   [ "$(status_field flushing)" -eq "$TEST_THRESHOLD" ] &&
 		   [ "$(status_field immutable)" -eq 0 ] &&
-		   [ "$(status_field sstables)" -eq 1 ] &&
+		   [ "$(status_field sstables)" -eq 0 ] &&
 		   [ "$wp" -eq "$expected_wp" ]; then
 			return 0
 		fi
 		sleep 0.1
 	done
 
-	die "the SSTable retry did not converge at $expected_wp: $(dmsetup status "$TARGET_NAME")"
+	die "metadata appends were not disabled at $expected_wp: $(dmsetup status "$TARGET_NAME")"
 }
 
-# Build this exact append-only layout:
-#
-#   [super][torn header][retry header][retry payload]
-#            `claims this ^ block as its own payload
+# First leave a header whose payload write fails.
 first_header=$(meta_zone_write_pointer) ||
 	die "could not read the first SSTable position"
 failed_payload=$((first_header + BLOCK_SECTORS))
@@ -101,33 +98,68 @@ wait_for_torn_flush "$failed_payload"
 nullblk_badblock_remove "$failed_payload" "$failed_payload_end" ||
 	die "could not remove the metadata payload failure"
 
-# Any later write asks the engine to retry the table left in its flushing slot.
+# A later write asks the worker to retry, but a partial metadata record must
+# disable every further append in this target instance.
 write_fixture_block "$tmp_dir/pat-c" 30
-retry_end=$((failed_payload + 2 * BLOCK_SECTORS))
-wait_for_retry "$retry_end"
+wait_for_metadata_disable "$failed_payload"
 
-# Shutdown appends the remaining active mapping, making the old torn header an
-# interior record rather than an incomplete tail.
+# Shutdown must not append either generation after the torn header.
 detach_dm_target
 meta_wp_before_reopen=$(meta_zone_write_pointer) ||
-	die "could not read the final corrupt-log write pointer"
-expected_final_wp=$((retry_end + 2 * BLOCK_SECTORS))
-[ "$meta_wp_before_reopen" -eq "$expected_final_wp" ] ||
-	die "shutdown did not append exactly one final SSTable: expected WP $expected_final_wp, got $meta_wp_before_reopen"
+	die "could not read the torn-log write pointer"
+[ "$meta_wp_before_reopen" -eq "$failed_payload" ] ||
+	die "metadata append continued after a torn record: expected WP $failed_payload, got $meta_wp_before_reopen"
 
-case_torn_sstable_is_refused() {
+case_incomplete_sstable_is_refused() {
 	local name="$TARGET_NAME"
 	local sectors meta_wp_after
 
-	sectors=$(blockdev --getsz "$UNDERLYING") ||
-		fail "failed to read the sector count of $UNDERLYING"
+	sectors=$ZNS_TARGET_SECTORS_ACTIVE
+	[ -n "$sectors" ] || fail "the formatted target size was not retained"
+	if dmsetup info "$name" >/dev/null 2>&1; then
+		fail "the probe target still exists before incomplete-log recovery"
+	fi
+	if try_create_dm_target "$name" "$sectors"; then
+		dmsetup remove --retry "$name" 2>/dev/null ||
+			fail "the incomplete-log target was accepted and could not be removed"
+		fail "an SSTable with no payload was accepted during recovery"
+	fi
+
+	meta_wp_after=$(meta_zone_write_pointer) ||
+		fail "could not re-read the metadata write pointer"
+	assert_eq "$meta_wp_after" "$meta_wp_before_reopen" \
+		"refusing an incomplete SSTable modified the metadata log"
+	detail "incomplete_header=$first_header meta_wptr=$meta_wp_after"
+}
+
+run_case "when an SSTable payload is incomplete, recovery refuses the target" \
+	case_incomplete_sstable_is_refused
+
+# Simulate a later writer or an older implementation advancing the physical WP
+# over the missing payload. Bounds now look complete, so recovery must reject
+# the table by validating its payload CRC and structure.
+dd if="$tmp_dir/pat-c" of="$UNDERLYING" bs=512 seek="$failed_payload" \
+	count="$BLOCK_SECTORS" conv=notrunc oflag=direct status=none ||
+	die "could not append a corrupt replacement payload"
+meta_wp_before_reopen=$(meta_zone_write_pointer) ||
+	die "could not read the corrupt-log write pointer"
+expected_final_wp=$((failed_payload + BLOCK_SECTORS))
+[ "$meta_wp_before_reopen" -eq "$expected_final_wp" ] ||
+	die "corrupt payload did not advance metadata WP to $expected_final_wp: got $meta_wp_before_reopen"
+
+case_corrupt_sstable_is_refused() {
+	local name="$TARGET_NAME"
+	local sectors meta_wp_after
+
+	sectors=$ZNS_TARGET_SECTORS_ACTIVE
+	[ -n "$sectors" ] || fail "the formatted target size was not retained"
 	if dmsetup info "$name" >/dev/null 2>&1; then
 		fail "the probe target still exists before corrupt-log recovery"
 	fi
 	if try_create_dm_target "$name" "$sectors"; then
 		dmsetup remove --retry "$name" 2>/dev/null ||
 			fail "the corrupt-log target was accepted and could not be removed"
-		fail "a torn interior SSTable was accepted during recovery"
+		fail "an SSTable with a corrupt payload was accepted during recovery"
 	fi
 
 	meta_wp_after=$(meta_zone_write_pointer) ||
@@ -137,8 +169,8 @@ case_torn_sstable_is_refused() {
 	detail "torn_header=$first_header meta_wptr=$meta_wp_after"
 }
 
-run_case "when an interior SSTable payload is torn, recovery refuses the target" \
-	case_torn_sstable_is_refused
+run_case "when a torn SSTable payload is later occupied, recovery refuses the target" \
+	case_corrupt_sstable_is_refused
 remove_dm_target
 
 report_summary

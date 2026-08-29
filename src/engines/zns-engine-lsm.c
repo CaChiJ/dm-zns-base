@@ -88,6 +88,39 @@ struct zns_lsm_io_work {
 	struct bio *bio;
 };
 
+struct zns_lsm_wp_report {
+	sector_t write_pointer;
+	u8 condition;
+};
+
+static int zns_lsm_wp_report_cb(struct blk_zone *zone, unsigned int index,
+				void *data)
+{
+	struct zns_lsm_wp_report *report = data;
+
+	(void)index;
+	report->write_pointer = zone->wp;
+	report->condition = zone->cond;
+	return 0;
+}
+
+static int zns_lsm_report_wp(struct zns_lsm *lsm, sector_t sector,
+			     struct zns_lsm_wp_report *report)
+{
+	int ret;
+
+	report->write_pointer = (sector_t)-1;
+	report->condition = BLK_ZONE_COND_NOT_WP;
+	ret = blkdev_report_zones(lsm->lower_bdev, sector, 1,
+				  zns_lsm_wp_report_cb, report);
+	if (ret < 0)
+		return ret;
+	if (ret != 1)
+		return -EIO;
+
+	return 0;
+}
+
 static int __maybe_unused zns_lsm_freeze_memtable(struct zns_lsm *lsm)
 {
 	if (!lsm)
@@ -195,6 +228,67 @@ static void zns_lsm_advance_meta_wp(struct zns_lsm *lsm, sector_t start,
 	mutex_unlock(&lsm->sst_lock);
 }
 
+/*
+ * A failed sequential-zone write may still move the device write pointer.
+ * Re-read it before another flush can choose an append position. If the zone
+ * cannot be inspected reliably, sacrifice the remaining metadata capacity
+ * instead of risking a write behind the real WP.
+ */
+static void zns_lsm_reconcile_failed_meta_write(struct zns_lsm *lsm,
+						 sector_t start,
+						 sector_t consumed)
+{
+	struct zns_lsm_wp_report report;
+	sector_t accounted = start + consumed;
+	sector_t actual;
+	bool unusable = consumed > 0;
+	int ret;
+
+	/*
+	 * Once the header has landed, any later error leaves an incomplete record
+	 * at the tail even when the failed block did not move the device WP. A retry
+	 * after that header would make the torn record interior corruption, so this
+	 * instance must never append to the metadata zone again.
+	 */
+	if (unusable)
+		DMERR_LIMIT("metadata write left an incomplete record at sector %llu",
+			    (unsigned long long)start);
+
+	ret = zns_lsm_report_wp(lsm, start, &report);
+	if (ret) {
+		DMERR_LIMIT("failed to inspect metadata zone after write error: %d",
+			    ret);
+		unusable = true;
+		actual = lsm->meta_end;
+	} else if (report.condition == BLK_ZONE_COND_FULL) {
+		actual = lsm->meta_end;
+	} else {
+		actual = report.write_pointer;
+	}
+
+	/*
+	 * Any mismatch means the failed write consumed an unknown amount of media or
+	 * the report cannot be reconciled with completed writes. Do not resume this
+	 * zone from an untrustworthy append position.
+	 */
+	if (!ret && actual != accounted) {
+		DMERR_LIMIT("metadata write pointer is inconsistent after error: expected %llu, reported %llu",
+			    (unsigned long long)accounted,
+			    (unsigned long long)actual);
+		unusable = true;
+	}
+	if (unusable)
+		actual = lsm->meta_end;
+
+	mutex_lock(&lsm->sst_lock);
+	if (actual > lsm->meta_wp)
+		lsm->meta_wp = actual;
+	mutex_unlock(&lsm->sst_lock);
+
+	if (unusable)
+		DMERR_LIMIT("metadata appends disabled until the zone is reset");
+}
+
 static void zns_lsm_publish_sstable(struct zns_lsm *lsm,
 				    struct zns_sstable *sst)
 {
@@ -247,6 +341,9 @@ static void zns_lsm_flush_worker(struct work_struct *work)
 				    lsm->meta_end, seq, &sst, &consumed);
 		if (consumed)
 			zns_lsm_advance_meta_wp(lsm, start, consumed);
+		if (ret && ret != -ENODATA && start < lsm->meta_end)
+			zns_lsm_reconcile_failed_meta_write(lsm, start,
+							 consumed);
 
 		if (ret == -ENODATA) {
 			/* Nothing to persist; just reclaim the table. */
@@ -349,30 +446,14 @@ static int zns_lsm_copy_bio_range(struct bio *bio, unsigned int bio_offset,
 	return -EIO;
 }
 
-struct zns_lsm_wp_report {
-	sector_t write_pointer;
-};
-
-static int zns_lsm_wp_report_cb(struct blk_zone *zone, unsigned int index,
-				void *data)
-{
-	struct zns_lsm_wp_report *report = data;
-
-	(void)index;
-	report->write_pointer = zone->wp;
-	return 0;
-}
-
 static void zns_lsm_reconcile_failed_write(struct zns_lsm *lsm,
 					    sector_t physical_sector)
 {
 	struct zns_lsm_wp_report report;
 	int ret;
 
-	report.write_pointer = (sector_t)-1;
-	ret = blkdev_report_zones(lsm->lower_bdev, physical_sector, 1,
-				  zns_lsm_wp_report_cb, &report);
-	if (ret != 1) {
+	ret = zns_lsm_report_wp(lsm, physical_sector, &report);
+	if (ret) {
 		DMERR_LIMIT("failed to inspect zone after write error: %d", ret);
 		return;
 	}
@@ -606,13 +687,13 @@ static void zns_lsm_free_sstables(struct zns_lsm *lsm)
  *
  * The metadata zone is an append-only log, so walking it forward replays the
  * order the flushes happened in, and list_add() leaves the newest at the head
- * where the read path already expects the winner to be. Only headers are read,
- * one block per SSTable, and each one says how far to jump to reach the next.
+ * where the read path already expects the winner to be. Each header says how
+ * far to jump to the next table, but its full payload is checksum- and
+ * structure-verified before the table is adopted.
  *
- * The walk ends at the first sector that does not begin a complete SSTable,
- * which is what a crash leaves at the tail. A read that fails outright is a
- * different matter and is reported, because an unreadable log must not look
- * like an empty one.
+ * An incomplete final table is also refused. Continuing after it would append
+ * new records beyond an uncommitted gap and turn that tail into permanent
+ * interior corruption on the next restart.
  */
 static int zns_lsm_recover_sstables(struct zns_lsm *lsm)
 {
@@ -623,30 +704,35 @@ static int zns_lsm_recover_sstables(struct zns_lsm *lsm)
 		struct zns_sstable *sst;
 
 		ret = zns_sst_load(lsm->lower_bdev, cursor, lsm->meta_wp, &sst);
-		if (ret == -EINVAL)
-			break;
-		if (ret)
+		if (ret == -ENODATA) {
+			DMERR("metadata zone %u has an incomplete SSTable at sector %llu",
+			      lsm->super.meta_zone_id,
+			      (unsigned long long)cursor);
+			return -EUCLEAN;
+		}
+		if (ret) {
+			DMERR("metadata zone %u is corrupt at sector %llu: %d",
+			      lsm->super.meta_zone_id,
+			      (unsigned long long)cursor, ret);
 			return ret;
+		}
+		if (sst->seq != lsm->next_sst_seq) {
+			DMERR("metadata zone %u has sequence %llu at sector %llu, expected %llu",
+			      lsm->super.meta_zone_id,
+			      (unsigned long long)sst->seq,
+			      (unsigned long long)cursor,
+			      (unsigned long long)lsm->next_sst_seq);
+			kfree(sst);
+			return -EUCLEAN;
+		}
 
 		list_add(&sst->list, &lsm->sstables);
 		lsm->nr_sstables++;
 		lsm->nr_sst_entries += sst->nr_entries;
-		if (sst->seq >= lsm->next_sst_seq)
-			lsm->next_sst_seq = sst->seq + 1;
+		lsm->next_sst_seq++;
 
 		cursor += (sector_t)sst->nr_blocks * ZNS_SST_BLOCK_SECTORS;
 	}
-
-	/*
-	 * Everything below cursor is accounted for. Anything above it reached
-	 * the zone but cannot be read back, so it is dropped -- and appending
-	 * still resumes at meta_wp, because the write pointer has moved past
-	 * those sectors for good.
-	 */
-	if (cursor != lsm->meta_wp)
-		DMWARN("metadata zone %u: dropping %llu sectors that follow the last complete SSTable",
-		       lsm->super.meta_zone_id,
-		       (unsigned long long)(lsm->meta_wp - cursor));
 
 	DMINFO("lsm: recovered %u SSTable(s) holding %llu mappings",
 	       lsm->nr_sstables, lsm->nr_sst_entries);
@@ -663,6 +749,34 @@ static bool zns_lsm_data_zones_dirty(const struct zns_lsm *lsm)
 			return true;
 
 	return false;
+}
+
+static int zns_lsm_validate_logical_capacity(struct zns_lsm *lsm,
+					      sector_t logical_sectors)
+{
+	sector_t usable_sectors = 0;
+	unsigned int i;
+
+	if (lsm->zone_table.nr_zones < 2)
+		return -EINVAL;
+
+	for (i = 0; i + 1 < lsm->zone_table.nr_zones; i++) {
+		sector_t capacity = lsm->zone_table.zones[i].capacity;
+
+		capacity -= capacity % lsm->sectors_per_block;
+		if (capacity > (sector_t)-1 - usable_sectors)
+			return -EOVERFLOW;
+		usable_sectors += capacity;
+	}
+
+	if (logical_sectors > usable_sectors) {
+		DMERR("logical size %llu exceeds usable data-zone capacity %llu",
+		      (unsigned long long)logical_sectors,
+		      (unsigned long long)usable_sectors);
+		return -ENOSPC;
+	}
+
+	return 0;
 }
 
 /*
@@ -737,8 +851,10 @@ static int zns_lsm_open_metadata(struct zns_lsm *lsm, sector_t logical_sectors)
 		return zns_lsm_recover_sstables(lsm);
 	}
 
-	if (zns_lsm_data_zones_dirty(lsm))
-		DMWARN("formatting an empty metadata zone while data zones already hold writes; their mappings are unrecoverable");
+	if (zns_lsm_data_zones_dirty(lsm)) {
+		DMERR("refusing to format an empty metadata zone while data zones already hold writes");
+		return -EUCLEAN;
+	}
 
 	lsm->super.uuid = get_random_u64();
 	ret = zns_super_write(lsm->lower_bdev, lsm->meta_start, &lsm->super);
@@ -757,7 +873,7 @@ int zns_engine_init(struct zns_engine *engine, struct block_device *lower_bdev,
 	struct zns_lsm *lsm;
 	int ret;
 
-	if (!engine || !lower_bdev || !sectors_per_block ||
+	if (!engine || !lower_bdev || !logical_sectors || !sectors_per_block ||
 	    !zns_lsm_memtable_threshold ||
 	    sectors_per_block != ZNS_SST_BLOCK_SECTORS ||
 	    logical_sectors % sectors_per_block ||
@@ -782,16 +898,21 @@ int zns_engine_init(struct zns_engine *engine, struct block_device *lower_bdev,
 	if (ret)
 		goto free_lsm;
 
-	ret = zns_lsm_open_metadata(lsm, logical_sectors);
+	ret = zns_lsm_validate_logical_capacity(lsm, logical_sectors);
 	if (ret)
 		goto free_sstables;
 
+	/* Validate and allocate all data-zone state before formatting metadata. */
 	ret = zns_allocator_init_zoned(&lsm->allocator,
 				       lsm->zone_table.zones,
 				       lsm->zone_table.nr_zones - 1,
 				       sectors_per_block);
 	if (ret)
 		goto free_sstables;
+
+	ret = zns_lsm_open_metadata(lsm, logical_sectors);
+	if (ret)
+		goto exit_allocator;
 
 	lsm->active_memtable = memtable_create();
 	if (!lsm->active_memtable) {
@@ -854,15 +975,19 @@ static void zns_lsm_flush_all_sync(struct zns_lsm *lsm)
 	for (i = 0; i < ARRAY_SIZE(generations); i++) {
 		struct zns_sstable *sst;
 		sector_t consumed;
+		sector_t start;
 		int ret;
 
 		if (!generations[i])
 			continue;
 
+		start = lsm->meta_wp;
 		ret = zns_sst_write(lsm->lower_bdev, generations[i],
-				    lsm->meta_wp, lsm->meta_end,
+				    start, lsm->meta_end,
 				    lsm->next_sst_seq, &sst, &consumed);
 		lsm->meta_wp += consumed;
+		if (ret && ret != -ENODATA && start < lsm->meta_end)
+			zns_lsm_reconcile_failed_meta_write(lsm, start, consumed);
 
 		if (ret == -ENODATA)	/* an empty generation holds nothing */
 			continue;

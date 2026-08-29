@@ -35,7 +35,8 @@ static int sstable_test_block_geometry(void)
 
 	/* One header block plus the payload blocks the entries need. */
 	if (zns_sst_nr_blocks(1) != 2 || zns_sst_nr_blocks(256) != 2 ||
-	    zns_sst_nr_blocks(257) != 3 || zns_sst_nr_blocks(512) != 3)
+	    zns_sst_nr_blocks(257) != 3 || zns_sst_nr_blocks(512) != 3 ||
+	    zns_sst_nr_blocks(U32_MAX) != 16777217)
 		return -EINVAL;
 
 	if (zns_sst_entries_in_block(300, 0) != 256 ||

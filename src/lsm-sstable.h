@@ -16,9 +16,8 @@ struct lsm_memtable;
  *
  *   [header][entries 0..255][entries 256..511]...[tail, zero padded]
  *
- * Nothing reads these blocks back after a restart yet. The magic, version,
- * sequence number, and CRC exist so that recovery can be added without
- * changing the format.
+ * Restart recovery validates the magic, version, sequence, payload CRC, entry
+ * count, key order, and key range before publishing an SSTable.
  */
 #define ZNS_SST_MAGIC		0x5a4e53535354424bULL	/* "ZNSSSTBK" */
 #define ZNS_SST_VERSION		1u
@@ -102,13 +101,12 @@ int zns_sst_write(struct block_device *bdev, struct lsm_memtable *memtable,
  * Read one SSTable header back and rebuild its in-memory index. limit is the
  * first sector past everything that ever reached the zone.
  *
- * A header that claims more blocks than fit below limit is refused. That is
- * what a crash leaves behind: the header decodes perfectly well, but the
- * payload behind it was never written, and a lookup into it would search
- * blocks holding whatever the media happens to contain.
+ * A header that claims more blocks than fit below limit is reported as an
+ * incomplete tail. A table that fits is adopted only after its payload CRC,
+ * key ordering, entry count, and min/max keys have been verified.
  *
- * Returns 0, -EINVAL when the sector does not begin a complete SSTable, or an
- * I/O error.
+ * Returns 0, -ENODATA for an incomplete tail, -EUCLEAN for corrupt metadata,
+ * or an I/O error.
  */
 int zns_sst_load(struct block_device *bdev, sector_t sector, sector_t limit,
 		 struct zns_sstable **result);

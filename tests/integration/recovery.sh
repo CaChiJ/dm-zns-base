@@ -242,8 +242,8 @@ case_length_mismatch_refused() {
 	local name="${TARGET_NAME}-short"
 	local sectors half
 
-	sectors=$(blockdev --getsz "$UNDERLYING") ||
-		fail "failed to read the sector count of $UNDERLYING"
+	sectors=$ZNS_TARGET_SECTORS_ACTIVE
+	[ -n "$sectors" ] || fail "the formatted target size was not retained"
 	half=$(( (sectors / 2 / BLOCK_SECTORS) * BLOCK_SECTORS ))
 
 	if try_create_dm_target "$name" "$half"; then
