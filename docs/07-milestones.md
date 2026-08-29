@@ -44,7 +44,7 @@ ext4는 ZNS 의미론을 모르기 때문에, 위쪽을 zoned로 광고하면(= 
 - `.features`에서 `DM_TARGET_ZONED_HM` 제거, `.report_zones` 제거 (위쪽엔 zone이 없으므로). queue limits에서 zone size 제약을 위로 노출하지 않는다.
 - `.map`에서 임의 LBA 쓰기를 활성 zone wp에 sequential append하고 매핑 테이블 갱신. 읽기는 매핑 lookup 후 underlying 좌표로 다시 매핑.
 - LSM-Tree(또는 sorted log + 컴팩션 비스무리한 구조)로 매핑 테이블 구성.
-- 매핑은 in-memory만. 영속화·crash recovery 없음 (stretch).
+- 매핑의 원본은 in-memory. 정상 종료(`dmsetup remove`, 모듈 reload)에서는 남은 MemTable을 예약 zone에 SSTable로 내려 쓰고 재시작 때 다시 읽어 들이므로 매핑이 살아남는다. 크래시 복구는 없다 — 전원이 끊기면 MemTable에 있던 매핑은 사라진다 (WAL은 stretch).
 
 ### 성공 기준 (FS 없이 raw block device에 직접)
 
@@ -76,6 +76,10 @@ md5sum /mnt/x/data            # hash B  — A와 같아야 함
 ```
 
 umount/remount 사이에 검증하는 이유는 페이지 캐시 우회. 안 그러면 DM 레이어를 거치지 않고 RAM에서 곧장 읽혀서 "정상 동작한다"는 잘못된 결론이 난다.
+
+현재 M1 필수 실행과 섞지 않은 사전 gate는
+`sudo ./test.sh ext4-roundtrip`으로 실행한다. 이 gate가 안정적으로 통과하면
+`system/ext4-roundtrip.sh`의 실행 프로필을 `required`로 승격한다.
 
 ---
 

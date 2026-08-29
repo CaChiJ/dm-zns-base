@@ -2,7 +2,7 @@
 
 졸업프로젝트 *"엣지 컴퓨팅을 위한 동적 플랫폼(Apache Kafka)과 ZNS(Zoned Namespace) SSD 호환을 위한 리눅스 커널 블록 계층 개발"* 의 학생용 base repo.
 
-목표는 sequential-only ZNS SSD 위에서 ext4 같은 zone-unaware 파일시스템이 동작하도록 임의 쓰기를 순차 쓰기로 변환하는 LSM-Tree 기반 Device Mapper 타깃을 만드는 것. 본 repo는 그 출발점으로 zoned-aware pass-through DM 타깃, 로컬 샌드박스(zoned `null_blk`), 마일스톤 정의를 제공한다. LSM-Tree 매핑·GC·메타데이터 영속화는 *과제의 산출물*이라 포함하지 않는다.
+목표는 sequential-only ZNS SSD 위에서 ext4 같은 zone-unaware 파일시스템이 동작하도록 임의 쓰기를 순차 쓰기로 변환하는 LSM-Tree 기반 Device Mapper 타깃을 만드는 것이다. 현재 repo에는 zone-aware allocator, MemTable/SSTable 매핑, 정상 종료 후 metadata 복구와 안전성 테스트가 포함되어 있다. GC와 power-loss 안전성을 위한 WAL은 아직 구현 범위 밖이다.
 
 ## Quickstart
 
@@ -32,6 +32,14 @@ sudo ./test.sh                    # required 프로필 (빌드 포함)
 | [06-build-and-run](docs/06-build-and-run.md) | 빌드 / 적재 / 테스트 / 진단 |
 | [07-milestones](docs/07-milestones.md) | M0 → M4 마일스톤과 성공 기준 |
 | [08-references](docs/08-references.md) | 공식 문서, prior art, 참고 자료 |
+| [09-code-guide](docs/09-code-guide.md) | 코드 읽는 순서와 규약 |
+| [10-components](docs/10-components.md) | 구성 요소별 책임 |
+| [11-engines](docs/11-engines.md) | 엔진(append4k / append4k-alloc / lsm) 비교 |
+| [12-tests](docs/12-tests.md) | 테스트 계층, 실행 프로필, 검증 범위 |
+| [13-io-size-test-matrix](docs/13-io-size-test-matrix.md) | request/payload 크기 매트릭스 |
+| [14-future-test-contracts](docs/14-future-test-contracts.md) | GC·durability 미래 계약 |
+| [15-milestone-gap-priorities](docs/15-milestone-gap-priorities.md) | 테스트 실패를 마일스톤별 우선순위로 해석 |
+| [16-m1-safety-failures-explained](docs/16-m1-safety-failures-explained.md) | 저장장치 기초부터 M1 안전성 실패와 수정 설계까지 설명 |
 
 ## 구조
 
