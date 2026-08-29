@@ -25,3 +25,6 @@ extended   standard   integration/payload-size-matrix.sh
 extended   standard   integration/request-size-matrix.sh
 extended   standard   integration/subblock-write.sh
 extended   standard   integration/zone-capacity.sh
+extended   standard   system/ext4-roundtrip.sh
+future     testing    integration/fsync-quiesced-recovery.sh
+future     testing    system/gc-cycle.sh
