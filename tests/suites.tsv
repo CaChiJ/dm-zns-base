@@ -1,0 +1,16 @@
+# Execution policy is metadata, not a directory hierarchy.
+# profile   build      suite
+required   standard   unit/allocator.sh
+required   standard   unit/memtable.sh
+required   standard   unit/sstable.sh
+required   standard   unit/super.sh
+required   standard   unit/zone-info.sh
+required   standard   integration/smoke.sh
+required   standard   integration/memtable-compaction.sh
+required   standard   integration/overwrite.sh
+required   standard   integration/randwrite-matrix.sh
+required   standard   integration/randwrite.sh
+required   standard   integration/recovery.sh
+required   standard   integration/sstable-flush.sh
+required   standard   integration/zone-boundary.sh
+required   standard   system/random-write-acceptance.sh

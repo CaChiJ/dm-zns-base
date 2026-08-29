@@ -8,8 +8,8 @@ ZNS_REQUIRED_ENGINE=lsm
 WORKLOAD_SIZE=${WORKLOAD_SIZE:-4M}
 
 TESTS_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-# shellcheck source=../lib/init.sh
-source "$TESTS_DIR/lib/init.sh"
+# shellcheck source=../support/lib/init.sh
+source "$TESTS_DIR/support/lib/init.sh"
 
 report_init "integration/randwrite"
 
@@ -40,7 +40,7 @@ case_write_pointer_advanced() {
 
 	wp_after=$(zone_write_pointer 0)
 	[ -n "$wp_after" ] || fail "could not read the final zone write pointer"
-	detail "wptr $wp_before -> $wp_after"
+	detail "wptr_before=$wp_before wptr_after=$wp_after"
 	assert_gt "$wp_after" "$wp_before" \
 		"the underlying zone write pointer did not advance"
 }

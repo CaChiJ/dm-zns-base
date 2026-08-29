@@ -9,7 +9,7 @@
 # or just let a command fail). There is no third state on purpose -- a suite
 # that could not run properly is a failure, not something to pass over.
 # A case reports its reason on stderr and may write one extra "key=value"
-# detail line to $ZNS_DETAIL_FILE.
+# detail line to $ZNS_DETAIL_FILE. Details are space-separated key=value pairs.
 
 [ -n "${ZNS_REPORT_SOURCED:-}" ] && return 0
 ZNS_REPORT_SOURCED=1
@@ -86,7 +86,9 @@ report_case() {
 	esac
 
 	if [ -n "$detail_text" ]; then
-		printf '%s[%s]%s %-68s %s\n' \
+		# A literal separator stays readable when case names are longer than a
+		# fixed terminal column and also makes result parsing unambiguous.
+		printf '%s[%s]%s %s | %s\n' \
 			"$color" "$status" "$ZNS_RESET" "$name" "$detail_text"
 	else
 		printf '%s[%s]%s %s\n' "$color" "$status" "$ZNS_RESET" "$name"

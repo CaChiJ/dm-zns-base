@@ -3,8 +3,8 @@
 set -euo pipefail
 
 TESTS_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-# shellcheck source=../lib/init.sh
-source "$TESTS_DIR/lib/init.sh"
+# shellcheck source=../support/lib/init.sh
+source "$TESTS_DIR/support/lib/init.sh"
 
 report_init "unit/sstable"
 require_root

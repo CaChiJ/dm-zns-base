@@ -3,7 +3,7 @@
  * Case table for the standalone dm-zns-base kernel test modules.
  *
  * Every case runs even when an earlier one fails, and each result is printed
- * on its own line. tests/lib/common.sh parses those lines back into the
+ * on its own line. tests/support/lib/common.sh parses those lines back into the
  * per-case PASS/FAIL output the shell suites produce, so a kernel unit test
  * and a shell integration test read the same way.
  */

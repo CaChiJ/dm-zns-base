@@ -10,8 +10,8 @@ ZNS_REQUIRED_ENGINE=lsm
 TEST_THRESHOLD=${TEST_THRESHOLD:-2}
 
 TESTS_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-# shellcheck source=../lib/init.sh
-source "$TESTS_DIR/lib/init.sh"
+# shellcheck source=../support/lib/init.sh
+source "$TESTS_DIR/support/lib/init.sh"
 
 report_init "integration/memtable-compaction"
 

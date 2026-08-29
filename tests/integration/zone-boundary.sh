@@ -9,8 +9,8 @@ ZNS_REQUIRED_ENGINE=lsm
 BLOCK_SECTORS=8
 
 TESTS_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-# shellcheck source=../lib/init.sh
-source "$TESTS_DIR/lib/init.sh"
+# shellcheck source=../support/lib/init.sh
+source "$TESTS_DIR/support/lib/init.sh"
 
 report_init "integration/zone-boundary"
 
@@ -60,7 +60,7 @@ case_zone_filled() {
 	local wptr
 
 	wptr=$(zone_write_pointer $((zone_id * zone_sectors)))
-	detail "zone $zone_id wptr=$wptr"
+	detail "zone=$zone_id wptr=$wptr"
 	assert_eq "$((wptr))" "$zone_sectors" \
 		"zone $zone_id did not stop at its boundary"
 }
@@ -69,7 +69,7 @@ case_next_zone_started() {
 	local wptr
 
 	wptr=$(zone_write_pointer $((2 * zone_sectors)))
-	detail "zone 2 wptr=$wptr"
+	detail "zone=2 wptr=$wptr"
 	assert_eq "$((wptr))" "$BLOCK_SECTORS" \
 		"zone 2 did not advance by exactly one block"
 }

@@ -7,8 +7,8 @@ TARGET_NAME=${TARGET_NAME:-zns-smoke}
 ZNS_REQUIRED_ENGINE=lsm
 
 TESTS_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-# shellcheck source=../lib/init.sh
-source "$TESTS_DIR/lib/init.sh"
+# shellcheck source=../support/lib/init.sh
+source "$TESTS_DIR/support/lib/init.sh"
 
 report_init "integration/smoke"
 

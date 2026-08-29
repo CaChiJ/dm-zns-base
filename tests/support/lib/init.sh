@@ -8,6 +8,10 @@ ZNS_INIT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 source "$ZNS_INIT_DIR/report.sh"
 # shellcheck source=common.sh
 source "$ZNS_INIT_DIR/common.sh"
+# shellcheck source=params.sh
+source "$ZNS_INIT_DIR/params.sh"
+# shellcheck source=nullblk.sh
+source "$ZNS_INIT_DIR/nullblk.sh"
 # shellcheck source=device.sh
 source "$ZNS_INIT_DIR/device.sh"
 # shellcheck source=assert.sh

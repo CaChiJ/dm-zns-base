@@ -9,10 +9,12 @@
 ZNS_COMMON_SOURCED=1
 
 ZNS_LIB_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-ZNS_TESTS_DIR=$(cd "$ZNS_LIB_DIR/.." && pwd)
+ZNS_SUPPORT_DIR=$(cd "$ZNS_LIB_DIR/.." && pwd)
+ZNS_TESTS_DIR=$(cd "$ZNS_SUPPORT_DIR/.." && pwd)
 ZNS_ROOT_DIR=$(cd "$ZNS_TESTS_DIR/.." && pwd)
 ZNS_SRC_DIR="$ZNS_ROOT_DIR/src"
 ZNS_UNIT_DIR="$ZNS_TESTS_DIR/unit"
+ZNS_TOOLS_DIR="$ZNS_SUPPORT_DIR/tools"
 
 ZNS_MOD_NAME=${ZNS_MOD_NAME:-dm-zns-base}
 ZNS_KO_PATH="$ZNS_SRC_DIR/$ZNS_MOD_NAME.ko"
@@ -105,8 +107,9 @@ require_zones() {
 # free, so run.sh can build once and every child script skips the rebuild.
 build_engine() {
 	local engine=${1:-$ZNS_ENGINE}
+	local build_key="$engine:${ZNS_TESTING:-0}"
 
-	if [ "${ZNS_ENGINE_BUILT:-}" = "$engine" ] && [ -f "$ZNS_KO_PATH" ]; then
+	if [ "${ZNS_ENGINE_BUILT:-}" = "$build_key" ] && [ -f "$ZNS_KO_PATH" ]; then
 		return 0
 	fi
 
@@ -118,9 +121,27 @@ build_engine() {
 	[ -f "$ZNS_KO_PATH" ] ||
 		die "the module was not produced: $ZNS_KO_PATH"
 
-	ZNS_ENGINE_BUILT=$engine
+	ZNS_ENGINE_BUILT=$build_key
 	export ZNS_ENGINE_BUILT
 	return 0
+}
+
+build_test_tools() {
+	if [ "${ZNS_TOOLS_BUILT:-}" = 1 ] &&
+	   [ -x "$ZNS_TOOLS_DIR/versioned-io" ] &&
+	   [ -x "$ZNS_TOOLS_DIR/byte-io" ]; then
+		return 0
+	fi
+
+	log_step "building userspace test tools"
+	run_make -C "$ZNS_TOOLS_DIR" || die "failed to build userspace test tools"
+	[ -x "$ZNS_TOOLS_DIR/versioned-io" ] ||
+		die "versioned-io was not produced"
+	[ -x "$ZNS_TOOLS_DIR/byte-io" ] ||
+		die "byte-io was not produced"
+
+	ZNS_TOOLS_BUILT=1
+	export ZNS_TOOLS_BUILT
 }
 
 # Build the standalone kernel test modules under tests/unit.

@@ -15,6 +15,8 @@ DM_DEV="/dev/mapper/$TARGET_NAME"
 # destroys a target somebody created by hand with scripts/build-run.sh.
 ZNS_MODULE_LOADED=0
 ZNS_TARGET_CREATED=0
+ZNS_BADBLOCK_TRACK_FILE=
+ZNS_TARGET_SECTORS_ACTIVE=
 
 ZNS_IO_ERROR_PATTERN='blk_update_request|I/O error|zone.*(reject|invalid)|write.*(reject|prohibited)'
 
@@ -26,11 +28,15 @@ unload_module() {
 	rmmod "$ZNS_MOD_NAME" 2>/dev/null || true
 }
 
-# Undo this suite's own target and module load, in that order.
+# Undo fault injection before target teardown can flush anything, then release
+# the suite's target and module.
 teardown_target() {
+	clear_injected_badblocks
 	[ "$ZNS_TARGET_CREATED" -eq 1 ] && remove_dm_target
 	[ "$ZNS_MODULE_LOADED" -eq 1 ] && unload_module
+	destroy_nullblk_fixture
 	[ -z "${tmp_dir:-}" ] || rm -rf "$tmp_dir"
+	[ -z "$ZNS_BADBLOCK_TRACK_FILE" ] || rm -f "$ZNS_BADBLOCK_TRACK_FILE"
 	return 0
 }
 
@@ -58,15 +64,22 @@ load_module() {
 }
 
 create_dm_target() {
-	local sectors
+	local sectors=${1:-${ZNS_TARGET_SECTORS:-}}
+	local physical_sectors
 
-	sectors=$(blockdev --getsz "$UNDERLYING") ||
+	physical_sectors=$(blockdev --getsz "$UNDERLYING") ||
 		die "failed to read the sector count of $UNDERLYING"
+	[ -n "$sectors" ] || sectors=$physical_sectors
+	[[ $sectors =~ ^[0-9]+$ ]] && [ "$sectors" -gt 0 ] ||
+		die "invalid DM target size: $sectors sectors"
+	[ "$sectors" -le "$physical_sectors" ] ||
+		die "DM target size $sectors exceeds lower size $physical_sectors"
 	echo "0 $sectors zns-base $UNDERLYING" |
 		dmsetup create "$TARGET_NAME" ||
 		die "failed to create the DM target $TARGET_NAME"
 	[ -b "$DM_DEV" ] || die "$DM_DEV was not created"
 	ZNS_TARGET_CREATED=1
+	ZNS_TARGET_SECTORS_ACTIVE=$sectors
 }
 
 # Take this suite's target down and insist that it went. remove_dm_target
@@ -85,8 +98,10 @@ detach_dm_target() {
 # Restart the engine on the same media: the DM instance goes away and a new one
 # opens the device again, with no zone reset in between.
 recreate_dm_target() {
+	local sectors=$ZNS_TARGET_SECTORS_ACTIVE
+
 	detach_dm_target
-	create_dm_target
+	create_dm_target "$sectors"
 }
 
 # Attempt a target of an arbitrary size and report whether dmsetup accepted it.
@@ -103,6 +118,25 @@ try_create_dm_target() {
 reset_zones() {
 	blkzone reset "$UNDERLYING" ||
 		die "failed to reset the zones of $UNDERLYING"
+}
+
+# Sum the live capacities of every data zone. The LSM engine reserves the last
+# zone for its superblock and SSTables, so its capacity is deliberately omitted.
+data_zone_capacity_sectors() {
+	local nr_zones zone_sectors zone_id capacity total=0
+
+	nr_zones=$(underlying_attr nr_zones) || return 1
+	zone_sectors=$(underlying_attr chunk_sectors) || return 1
+	[ "$nr_zones" -ge 2 ] || return 1
+
+	for ((zone_id = 0; zone_id + 1 < nr_zones; zone_id++)); do
+		capacity=$(zone_capacity $((zone_id * zone_sectors))) || return 1
+		[ -n "$capacity" ] || return 1
+		capacity=$(printf '%u' "$capacity") || return 1
+		total=$((total + capacity))
+	done
+
+	printf '%u\n' "$total"
 }
 
 # Value of one "key=value" field on the target's dmsetup status line.
@@ -167,7 +201,107 @@ zone_write_pointer() {
 					print value
 					exit
 				}
+			}'
+}
+
+# Capacity of one zone in sectors, as reported by the live block device rather
+# than inferred from its configured zone size.
+zone_capacity() {
+	local offset=$1
+
+	blkzone report -o "$offset" -c 1 "$UNDERLYING" |
+		awk 'NR == 1 {
+			for (i = 1; i <= NF; i++) {
+				key = $i
+				value = $(i + 1)
+				gsub(/[,:]/, "", key)
+				gsub(/,/, "", value)
+				if (key == "cap") {
+					print value
+					exit
+				}
+			}
 		}'
+}
+
+# blkzone commonly reports a write pointer relative to the zone start. Turn
+# either representation into an absolute sector so it can be used for direct
+# I/O and null_blk badblock injection.
+zone_absolute_wp() {
+	local zone_start=$1
+	local write_pointer
+
+	write_pointer=$(zone_write_pointer "$zone_start") || return 1
+	[ -n "$write_pointer" ] || return 1
+	if [ "$zone_start" -gt 0 ] && [ "$write_pointer" -lt "$zone_start" ]; then
+		write_pointer=$((zone_start + write_pointer))
+	fi
+	printf '%u\n' "$write_pointer"
+}
+
+nullblk_badblocks_path() {
+	local kernel_name
+
+	kernel_name=$(underlying_kernel_name) || return 1
+	[[ $kernel_name =~ ^nullb[0-9]+$ ]] || return 1
+
+	printf '/sys/kernel/config/nullb/%s/badblocks\n' "$kernel_name"
+}
+
+require_nullblk_badblocks() {
+	local path existing
+
+	path=$(nullblk_badblocks_path) ||
+		die "fault-injection suites require a null_blk UNDERLYING device"
+	[ -w "$path" ] ||
+		die "null_blk badblock injection is unavailable: $path"
+	existing=$(cat "$path") ||
+		die "cannot inspect existing null_blk badblocks: $path"
+	[ -z "$existing" ] ||
+		die "null_blk already has badblocks configured; refusing to modify them: $existing"
+	if [ -z "$ZNS_BADBLOCK_TRACK_FILE" ]; then
+		ZNS_BADBLOCK_TRACK_FILE=$(mktemp)
+		export ZNS_BADBLOCK_TRACK_FILE
+	fi
+}
+
+# null_blk accepts inclusive sector ranges in +start-end / -start-end form.
+# Track only ranges this suite added: teardown must not clear a range owned by
+# somebody else using the same test device.
+nullblk_badblock_add() {
+	local start=$1 end=$2 path
+
+	[ "$start" -ge 0 ] && [ "$end" -ge "$start" ] ||
+		return 1
+	path=$(nullblk_badblocks_path) || return 1
+	# Record first. If the configfs write fails, teardown harmlessly attempts to
+	# remove the range; if recording failed after injection there would be no
+	# reliable way to clean the device up.
+	printf '%s:%s\n' "$start" "$end" >>"$ZNS_BADBLOCK_TRACK_FILE" ||
+		return 1
+	printf '+%s-%s\n' "$start" "$end" >"$path"
+}
+
+nullblk_badblock_remove() {
+	local start=$1 end=$2 path
+
+	path=$(nullblk_badblocks_path) || return 1
+	printf -- '-%s-%s\n' "$start" "$end" >"$path" || return 1
+}
+
+clear_injected_badblocks() {
+	local path range start end
+
+	[ -n "$ZNS_BADBLOCK_TRACK_FILE" ] &&
+		[ -s "$ZNS_BADBLOCK_TRACK_FILE" ] || return 0
+	path=$(nullblk_badblocks_path) || return 0
+	while IFS= read -r range; do
+		[ -n "$range" ] || continue
+		start=${range%%:*}
+		end=${range#*:}
+		printf -- '-%s-%s\n' "$start" "$end" >"$path" 2>/dev/null || true
+	done <"$ZNS_BADBLOCK_TRACK_FILE"
+	: >"$ZNS_BADBLOCK_TRACK_FILE"
 }
 
 # Absolute "start wptr" pair for the last zone, which the LSM engine reserves

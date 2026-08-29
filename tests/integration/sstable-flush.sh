@@ -11,8 +11,8 @@ NR_BLOCKS=${NR_BLOCKS:-512}
 FLUSH_TIMEOUT=${FLUSH_TIMEOUT:-30}
 
 TESTS_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-# shellcheck source=../lib/init.sh
-source "$TESTS_DIR/lib/init.sh"
+# shellcheck source=../support/lib/init.sh
+source "$TESTS_DIR/support/lib/init.sh"
 
 report_init "integration/sstable-flush"
 
@@ -71,7 +71,7 @@ case_most_mappings_on_disk() {
 	local sst_entries
 
 	sst_entries=$(status_field sst_entries)
-	detail "sst_entries=$sst_entries of $NR_BLOCKS"
+	detail "sst_entries=$sst_entries total_blocks=$NR_BLOCKS"
 	assert_ge "$sst_entries" $((NR_BLOCKS * 3 / 4)) \
 		"too few mappings reached disk"
 }
@@ -121,7 +121,7 @@ case_metadata_zone_advanced() {
 
 	meta_wp_after=$(meta_zone_write_pointer) ||
 		fail "failed to re-read the metadata zone write pointer"
-	detail "meta wptr $meta_wp_before -> $meta_wp_after"
+	detail "meta_wptr_before=$meta_wp_before meta_wptr_after=$meta_wp_after"
 	assert_gt "$meta_wp_after" "$meta_wp_before" \
 		"the reserved metadata zone write pointer did not advance"
 }

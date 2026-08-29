@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
-# Parameter sweep for random writes: workload size, request size, and queue
-# depth. Behaviour that deserves its own judgement (write pointer progress,
-# CRC read-after-write, overwrite ordering) lives in the dedicated suites,
-# so every case here only asks whether the workload completes cleanly.
+# Parameter sweep for supported M1 random writes: workload size, request size,
+# and queue depth. Every case verifies its final data as well as completion.
+# Sub-4 KiB requests are covered by the extended integration/subblock-write suite.
 
 set -euo pipefail
 
@@ -10,8 +9,8 @@ TARGET_NAME=${TARGET_NAME:-zns-randwrite-matrix}
 ZNS_REQUIRED_ENGINE=lsm
 
 TESTS_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-# shellcheck source=../lib/init.sh
-source "$TESTS_DIR/lib/init.sh"
+# shellcheck source=../support/lib/init.sh
+source "$TESTS_DIR/support/lib/init.sh"
 
 report_init "integration/randwrite-matrix"
 
@@ -36,7 +35,8 @@ case_sweep() {
 
 	io_errors_save "$tmp_dir/io-errors"
 	run_fio "$tmp_dir/$job_name.log" "$job_name" \
-		--rw=randwrite --bs="$bs" --size="$size" --iodepth="$iodepth"
+		--rw=randwrite --bs="$bs" --size="$size" --iodepth="$iodepth" \
+		--verify=crc32c --verify_fatal=1 --verify_state_save=0
 	assert_no_new_io_errors "$tmp_dir/io-errors"
 	detail "size=$size bs=$bs iodepth=$iodepth"
 }
@@ -48,12 +48,6 @@ run_case "when 4 KiB randwrites cover 32 MiB, the append continues" \
 run_case "when 4 KiB randwrites cover 100 MiB, the append continues" \
 	case_sweep 100M 4k 32
 
-# Sub-4 KiB requests are a real capability question, not an environment one:
-# only rmw4k merges them, so append4k and lsm fail these two cases and say so.
-run_case "when requests are 1 KiB, randwrites complete" \
-	case_sweep 64M 1k 8
-run_case "when requests are 2 KiB, randwrites complete" \
-	case_sweep 64M 2k 8
 run_case "when requests are 4 KiB, the native mapping size is used" \
 	case_sweep 64M 4k 8
 run_case "when requests are 8 KiB, DM splits them into 4 KiB writes" \

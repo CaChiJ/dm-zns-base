@@ -25,8 +25,8 @@ UNWRITTEN_LBA=${UNWRITTEN_LBA:-8192}
 BLOCK_SECTORS=8
 
 TESTS_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-# shellcheck source=../lib/init.sh
-source "$TESTS_DIR/lib/init.sh"
+# shellcheck source=../support/lib/init.sh
+source "$TESTS_DIR/support/lib/init.sh"
 
 report_init "integration/recovery"
 
@@ -85,7 +85,7 @@ assert_range() {
 # --- a freshly formatted device must carry a superblock ---------------------
 
 case_superblock_written() {
-	detail "meta start=$meta_start wptr=$meta_wp_fresh"
+	detail "meta_start=$meta_start meta_wptr=$meta_wp_fresh"
 	assert_eq "$meta_wp_fresh" "$((meta_start + BLOCK_SECTORS))" \
 		"the metadata zone holds no superblock after formatting"
 }
@@ -130,7 +130,7 @@ case_sstables_survive() {
 }
 
 case_sstables_recovered() {
-	detail "sstables $sstables_before -> $sstables_after"
+	detail "sstables_before=$sstables_before sstables_after=$sstables_after"
 	assert_ge "$sstables_after" 1 \
 		"no SSTable was picked up from the metadata zone"
 }
@@ -226,7 +226,7 @@ case_length_mismatch_refused() {
 		dmsetup remove "$name" 2>/dev/null || true
 		fail "a $half sector target was accepted on media formatted for $sectors sectors"
 	fi
-	detail "refused len=$half formatted=$sectors"
+	detail "table_len=$half formatted_len=$sectors refused=1"
 	return 0
 }
 

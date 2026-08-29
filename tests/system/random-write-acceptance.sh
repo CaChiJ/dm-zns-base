@@ -20,26 +20,30 @@ SECTOR_BYTES=512
 TEST_LBA=100
 
 TESTS_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-# shellcheck source=../lib/init.sh
-source "$TESTS_DIR/lib/init.sh"
+# shellcheck source=../support/lib/init.sh
+source "$TESTS_DIR/support/lib/init.sh"
 
-report_init "acceptance/m1"
+report_init "system/random-write-acceptance"
 
 require_root
 require_commands make fio jq dmsetup blkzone blockdev dmesg insmod rmmod \
 	awk dd cmp readlink date
 require_host_managed
 
-writable_capacity_bytes() {
+data_zone_writable_capacity_bytes() {
 	local snapshot=$1
 	local total_sectors=0
+	local metadata_capacity=0
 	local id start length capacity write_pointer
 
 	while read -r id start length capacity write_pointer; do
 		total_sectors=$((total_sectors + capacity))
+		metadata_capacity=$capacity
 	done <"$snapshot"
 
-	echo $((total_sectors * SECTOR_BYTES))
+	# The LSM engine reserves the last zone, so its capacity cannot satisfy the
+	# data workload precondition.
+	echo $(((total_sectors - metadata_capacity) * SECTOR_BYTES))
 }
 
 trap teardown_target EXIT
@@ -47,7 +51,7 @@ tmp_dir=$(mktemp -d)
 
 snapshot_zones "$tmp_dir/zones-capacity" ||
 	die "could not read a usable zone report from $UNDERLYING"
-writable_bytes=$(writable_capacity_bytes "$tmp_dir/zones-capacity")
+writable_bytes=$(data_zone_writable_capacity_bytes "$tmp_dir/zones-capacity")
 [ "$writable_bytes" -ge "$REQUIRED_BYTES" ] ||
 	die "insufficient writable capacity: $writable_bytes bytes, $REQUIRED_BYTES required"
 
@@ -139,6 +143,7 @@ case_upper_is_conventional() {
 case_official_randwrite() {
 	run_fio "$tmp_dir/randwrite-run.log" m1-acceptance-randwrite \
 		--rw=randwrite --bs=4k --size=100M --iodepth=32 \
+		--verify=crc32c --verify_fatal=1 --verify_state_save=0 \
 		--output-format=json --output="$tmp_dir/randwrite.json"
 
 	jq -e --argjson bytes "$RANDWRITE_BYTES" '
@@ -151,12 +156,15 @@ case_official_randwrite() {
 		(((.jobs[0]["job options"].size | text) == "100m") or
 		 ((.jobs[0]["job options"].size | text) == ($bytes | tostring))) and
 		((.jobs[0]["job options"].iodepth | text) == "32") and
+		((.jobs[0]["job options"].verify | text) == "crc32c") and
 		.jobs[0].write.io_bytes == $bytes and
 		.jobs[0].write.total_ios == 25600 and
+		.jobs[0].read.io_bytes == $bytes and
+		.jobs[0].read.total_ios == 25600 and
 		((.jobs[0].iodepth_level["32"] // 0) > 0)
 	' "$tmp_dir/randwrite.json" >/dev/null ||
-		fail "the fio JSON does not match the 4 KiB / 100 MiB / iodepth 32 workload"
-	detail "io=100MiB writes=25600 iodepth=32"
+		fail "the fio JSON does not match the verified 4 KiB / 100 MiB / iodepth 32 workload"
+	detail "io=100MiB writes=25600 verify=crc32c iodepth=32"
 }
 
 case_crc_verify_range() {
@@ -207,7 +215,7 @@ case_zone_pointer_advanced() {
 
 	advanced=$(compare_zone_snapshots "$tmp_dir/zones-before" \
 		"$tmp_dir/zones-after")
-	detail "zones advanced=$advanced"
+	detail "zones_advanced=$advanced"
 	assert_ge "$advanced" 1 "no underlying zone write pointer advanced"
 }
 
@@ -224,7 +232,7 @@ run_case "when the module is loaded with a threshold, the parameter is applied" 
 	case_threshold_parameter
 run_case "when the target is created, the upper device is conventional" \
 	case_upper_is_conventional
-run_case "when the official 100 MiB 4 KiB randwrite runs, fio reports 25,600 writes" \
+run_case "when the official 100 MiB randwrite runs, all 25,600 final blocks verify" \
 	case_official_randwrite
 run_case "when a separate 32 MiB range is CRC verified, every read matches" \
 	case_crc_verify_range
