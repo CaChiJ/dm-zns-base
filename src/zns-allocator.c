@@ -151,3 +151,44 @@ int zns_allocator_alloc(struct zns_allocator *allocator,
 
 	return ret;
 }
+
+int zns_allocator_rollback(struct zns_allocator *allocator,
+			   sector_t physical_sector)
+{
+	int ret = -EBUSY;
+
+	if (!allocator)
+		return -EINVAL;
+
+	spin_lock(&allocator->lock);
+	if (allocator->mode == ZNS_ALLOCATOR_LINEAR) {
+		if (allocator->next_sector ==
+		    physical_sector + allocator->sectors_per_block) {
+			allocator->next_sector = physical_sector;
+			ret = 0;
+		}
+	} else {
+		unsigned int i;
+
+		for (i = 0; i < allocator->nr_zones; i++) {
+			struct zns_zone *zone = &allocator->zones[i];
+			sector_t zone_end = zone->start_sector + zone->capacity;
+
+			if (physical_sector < zone->start_sector ||
+			    physical_sector >= zone_end)
+				continue;
+			if (zone->write_pointer !=
+			    physical_sector + allocator->sectors_per_block)
+				break;
+
+			zone->write_pointer = physical_sector;
+			if (allocator->active_zone > i)
+				allocator->active_zone = i;
+			ret = 0;
+			break;
+		}
+	}
+	spin_unlock(&allocator->lock);
+
+	return ret;
+}

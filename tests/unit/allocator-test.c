@@ -88,6 +88,60 @@ static int allocator_test_enospc(void)
 	return ret == -ENOSPC ? 0 : -EINVAL;
 }
 
+static int allocator_test_rollback(void)
+{
+	struct zns_zone zone = {
+		.id = 0,
+		.start_sector = 64,
+		.length = 16,
+		.capacity = 8,
+		.write_pointer = 64,
+		.condition = BLK_ZONE_COND_EMPTY,
+	};
+	struct zns_allocator allocator;
+	sector_t sector;
+	int ret;
+
+	ret = zns_allocator_init(&allocator, 16, TEST_BLOCK_SECTORS);
+	if (ret)
+		return ret;
+	ret = zns_allocator_alloc(&allocator, &sector);
+	if (ret || sector != 0 || zns_allocator_rollback(&allocator, sector)) {
+		zns_allocator_exit(&allocator);
+		return -EINVAL;
+	}
+	ret = zns_allocator_alloc(&allocator, &sector);
+	if (ret || sector != 0) {
+		zns_allocator_exit(&allocator);
+		return -EINVAL;
+	}
+	ret = zns_allocator_alloc(&allocator, &sector);
+	if (ret || sector != TEST_BLOCK_SECTORS ||
+	    zns_allocator_rollback(&allocator, 0) != -EBUSY) {
+		zns_allocator_exit(&allocator);
+		return -EINVAL;
+	}
+	zns_allocator_exit(&allocator);
+
+	ret = zns_allocator_init_zoned(&allocator, &zone, 1,
+				       TEST_BLOCK_SECTORS);
+	if (ret)
+		return ret;
+	ret = zns_allocator_alloc(&allocator, &sector);
+	if (ret || sector != 64 || allocator.active_zone != 1 ||
+	    zns_allocator_rollback(&allocator, sector) ||
+	    allocator.active_zone != 0) {
+		zns_allocator_exit(&allocator);
+		return -EINVAL;
+	}
+	ret = zns_allocator_alloc(&allocator, &sector);
+	zns_allocator_exit(&allocator);
+	if (ret || sector != 64 || zns_allocator_rollback(NULL, 0) != -EINVAL)
+		return -EINVAL;
+
+	return 0;
+}
+
 static int allocator_test_zoned_boundaries(void)
 {
 	struct zns_zone zones[] = {
@@ -468,6 +522,8 @@ static const struct zns_test_case allocator_cases[] = {
 		      "when blocks are allocated in order, the allocator returns 0, 8, 16 and on"),
 	ZNS_TEST_CASE(allocator_test_enospc,
 		      "when every block is used, the next allocation reports -ENOSPC"),
+	ZNS_TEST_CASE(allocator_test_rollback,
+		      "when the latest reservation is unused, rollback makes it allocatable again"),
 	ZNS_TEST_CASE(allocator_test_zoned_boundaries,
 		      "when a zone reaches capacity, allocation moves on to the next zone"),
 	ZNS_TEST_CASE(allocator_test_zoned_partial_capacity,

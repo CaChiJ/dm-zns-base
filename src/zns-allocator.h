@@ -33,5 +33,7 @@ int zns_allocator_init_zoned(struct zns_allocator *allocator,
 void zns_allocator_exit(struct zns_allocator *allocator);
 int zns_allocator_alloc(struct zns_allocator *allocator,
 			sector_t *physical_sector);
+int zns_allocator_rollback(struct zns_allocator *allocator,
+			   sector_t physical_sector);
 
 #endif
