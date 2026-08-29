@@ -4,6 +4,10 @@ obj-m += dm-zns-base.o
 dm-zns-base-y := dm-zns-base-main.o zns-allocator.o zns-zone.o lsm-memtable.o lsm-sstable.o lsm-super.o engines/zns-engine-$(ZNS_ENGINE).o
 ccflags-y += -I$(src)
 
+ifeq ($(ZNS_TESTING),1)
+ccflags-y += -DDM_ZNS_BASE_TESTING
+endif
+
 KDIR ?= /lib/modules/$(shell uname -r)/build
 PWD  := $(shell pwd)
 

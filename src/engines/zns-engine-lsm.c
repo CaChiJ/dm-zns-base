@@ -38,6 +38,18 @@ module_param_named(memtable_threshold, zns_lsm_memtable_threshold, uint, 0444);
 MODULE_PARM_DESC(memtable_threshold,
 		 "Number of active MemTable entries that triggers a freeze");
 
+#ifdef DM_ZNS_BASE_TESTING
+/*
+ * Test-only approximation of losing volatile mappings after I/O has quiesced.
+ * It deliberately does not claim to model an in-flight crash or power loss.
+ */
+static bool zns_lsm_test_skip_shutdown_flush;
+module_param_named(test_skip_shutdown_flush,
+		   zns_lsm_test_skip_shutdown_flush, bool, 0400);
+MODULE_PARM_DESC(test_skip_shutdown_flush,
+		 "TEST ONLY: omit the clean-detach MemTable flush");
+#endif
+
 struct zns_lsm {
 	struct block_device *lower_bdev;
 	struct zns_zone_table zone_table;
@@ -688,7 +700,12 @@ void zns_engine_exit(struct zns_engine *engine)
 	destroy_workqueue(lsm->flush_wq);
 
 	/* Only now is nothing else writing, so the tables can be serialized. */
-	zns_lsm_flush_all_sync(lsm);
+#ifdef DM_ZNS_BASE_TESTING
+	if (zns_lsm_test_skip_shutdown_flush)
+		DMWARN("TEST ONLY: skipping clean-detach MemTable flush");
+	else
+#endif
+		zns_lsm_flush_all_sync(lsm);
 
 	memtable_free(lsm->active_memtable);
 	memtable_free(lsm->immutable_memtable);

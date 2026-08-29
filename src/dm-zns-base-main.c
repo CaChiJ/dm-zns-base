@@ -3,10 +3,12 @@
  * dm-zns-base: Device Mapper target shell for ZNS translation engines.
  */
 
+#include <linux/atomic.h>
 #include <linux/device-mapper.h>
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/slab.h>
+#include <linux/string.h>
 
 #include "zns-engine.h"
 
@@ -15,6 +17,11 @@
 struct zns_base_c {
 	struct dm_dev *dev;
 	struct zns_engine engine;
+	sector_t logical_sectors;
+	sector_t physical_sectors;
+	atomic64_t flush_requests;
+	atomic64_t flush_completed;
+	atomic64_t flush_failed;
 };
 
 static int zns_base_ctr(struct dm_target *ti, unsigned int argc, char **argv)
@@ -40,7 +47,15 @@ static int zns_base_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 		return ret;
 	}
 
-	ret = zns_engine_init(&c->engine, c->dev->bdev, ti->len, ti->len, ZNS_BASE_BLOCK_SECTORS);
+	c->logical_sectors = ti->len;
+	c->physical_sectors = bdev_nr_sectors(c->dev->bdev);
+	atomic64_set(&c->flush_requests, 0);
+	atomic64_set(&c->flush_completed, 0);
+	atomic64_set(&c->flush_failed, 0);
+
+	ret = zns_engine_init(&c->engine, c->dev->bdev,
+			      c->logical_sectors, c->physical_sectors,
+			      ZNS_BASE_BLOCK_SECTORS);
 	if (ret) {
 		ti->error = "failed to initialize ZNS engine";
 		dm_put_device(ti, c->dev);
@@ -78,7 +93,25 @@ static int zns_base_map(struct dm_target *ti, struct bio *bio)
 {
 	struct zns_base_c *c = ti->private;
 
+	if (bio_op(bio) == REQ_OP_FLUSH)
+		atomic64_inc(&c->flush_requests);
+
 	return zns_engine_map(&c->engine, bio);
+}
+
+static int zns_base_end_io(struct dm_target *ti, struct bio *bio,
+			   blk_status_t *error)
+{
+	struct zns_base_c *c = ti->private;
+
+	if (bio_op(bio) == REQ_OP_FLUSH) {
+		if (*error)
+			atomic64_inc(&c->flush_failed);
+		else
+			atomic64_inc(&c->flush_completed);
+	}
+
+	return DM_ENDIO_DONE;
 }
 
 static void zns_base_status(struct dm_target *ti, status_type_t type,
@@ -95,6 +128,14 @@ static void zns_base_status(struct dm_target *ti, status_type_t type,
 	switch (type) {
 	case STATUSTYPE_INFO:
 		zns_engine_status(&c->engine, result, maxlen);
+		sz = strnlen(result, maxlen);
+		DMEMIT(" logical_sectors=%llu physical_sectors=%llu "
+		       "flush_requests=%lld flush_completed=%lld flush_failed=%lld",
+		       (unsigned long long)c->logical_sectors,
+		       (unsigned long long)c->physical_sectors,
+		       (long long)atomic64_read(&c->flush_requests),
+		       (long long)atomic64_read(&c->flush_completed),
+		       (long long)atomic64_read(&c->flush_failed));
 		break;
 	case STATUSTYPE_TABLE:
 		DMEMIT("%s", c->dev->name);
@@ -111,6 +152,7 @@ static struct target_type zns_base_target = {
 	.ctr             = zns_base_ctr,
 	.dtr             = zns_base_dtr,
 	.map             = zns_base_map,
+	.end_io          = zns_base_end_io,
 	.status          = zns_base_status,
 };
 
