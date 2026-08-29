@@ -7,6 +7,7 @@
 | [10-components](10-components.md) | Device Mapper 진입점, 엔진 인터페이스, zone table, allocator, MemTable의 책임과 연결 관계 |
 | [11-engines](11-engines.md) | `append4k`, `append4k-alloc`, `lsm`의 I/O 전략과 차이 |
 | [12-tests](12-tests.md) | 각 단위·통합·인수 테스트가 만드는 환경, 자극하는 경로, 판정하는 결과 |
+| [17-lsm-safety-hardening-handoff](17-lsm-safety-hardening-handoff.md) | LSM 필수 수정의 이유, 변경 후 동작, 검증 범위와 읽기 순서 |
 
 ## 한눈에 보는 데이터 경로
 

@@ -40,6 +40,7 @@ sudo ./test.sh                    # required 프로필 (빌드 포함)
 | [14-future-test-contracts](docs/14-future-test-contracts.md) | GC·durability 미래 계약 |
 | [15-milestone-gap-priorities](docs/15-milestone-gap-priorities.md) | 테스트 실패를 마일스톤별 우선순위로 해석 |
 | [16-m1-safety-failures-explained](docs/16-m1-safety-failures-explained.md) | 저장장치 기초부터 M1 안전성 실패와 수정 설계까지 설명 |
+| [17-lsm-safety-hardening-handoff](docs/17-lsm-safety-hardening-handoff.md) | LSM 필수 수정의 이유·동작·검증 결과 인수인계 |
 
 ## 구조
 
