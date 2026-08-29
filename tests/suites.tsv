@@ -14,6 +14,7 @@ required   standard   integration/randwrite-matrix.sh
 required   standard   integration/randwrite.sh
 required   standard   integration/recovery.sh
 required   standard   integration/sstable-flush.sh
+required   standard   integration/subblock-write.sh
 required   standard   integration/write-failure.sh
 required   standard   integration/zone-boundary.sh
 required   standard   system/random-write-acceptance.sh
@@ -23,7 +24,6 @@ extended   standard   integration/metadata-exhaustion.sh
 extended   standard   integration/operation-contract.sh
 extended   standard   integration/payload-size-matrix.sh
 extended   standard   integration/request-size-matrix.sh
-extended   standard   integration/subblock-write.sh
 extended   standard   integration/zone-capacity.sh
 extended   standard   system/ext4-roundtrip.sh
 future     testing    integration/fsync-quiesced-recovery.sh

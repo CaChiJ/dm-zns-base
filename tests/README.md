@@ -58,10 +58,10 @@ before the module is rebuilt and only `testing` suites run with instrumentation.
 
 ### Integration
 
-- `required`: smoke, overwrite ordering, random-write verification, request
-  splitting matrix, zone boundary handling, MemTable/SSTable lifecycle,
+- `required`: smoke, overwrite ordering, random-write verification, sub-block
+  RMW, request splitting, zone boundary handling, MemTable/SSTable lifecycle,
   recovery, lower-write atomicity, and metadata format/torn-write safety.
-- `extended`: request-size and exact-byte payload matrices, sub-block writes,
+- `extended`: request-size and exact-byte payload matrices,
   data/metadata exhaustion, operation advertisement, partial zone capacity, and
   short concurrent lifecycle stress. Direct update cases snapshot the enclosing
   aligned span and compare every byte outside the requested range after fio
@@ -139,9 +139,9 @@ result detail. Setup failure is a failure, never an implicit skip.
 data-safety defects. They are not optional merely because the current code is
 red.
 
-The size matrices and sub-block behaviour are `extended`: they report every
-configured operation/size/offset combination independently without changing
-the definition of the current M1 gate.
+The broad size matrices remain `extended`: they report every configured
+operation/size/offset combination independently. The focused sub-block RMW
+contract is part of the `required` profile.
 
 The future profile contains the forced GC cycle and synchronized mapping
 recovery contract.

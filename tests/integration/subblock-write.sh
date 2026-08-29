@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Extended integration check for writes smaller than the native 4 KiB mapping
-# block. The LSM engine does not support these yet, so this suite is excluded
-# from the default `required` profile and remains a visible red contract.
+# Required integration check for writes smaller than the native 4 KiB mapping
+# block. The LSM engine preserves a 4 KiB mapping by rewriting the full block.
 
 set -euo pipefail
 
