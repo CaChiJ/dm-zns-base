@@ -38,20 +38,7 @@ cd src && make
 
 ## 수동으로 `dmsetup` 다루기
 
-엔진별 usable capacity 계산까지 포함한 수동 실행은 다음 스크립트를 사용한다.
-
 ```bash
-sudo bash scripts/build-run.sh lsm
-sudo dmsetup status myzns-base
-```
-
-`lsm`은 마지막 zone을 metadata로 예약하고 각 data zone의 4 KiB 미만 tail을
-노출하지 않으므로, 하위 장치 전체 sector 수로 target을 만들면 생성이 거부된다.
-아래처럼 전체 크기를 직접 쓰는 예시는 예약 zone이 없는 `append4k` 계열에만
-해당한다.
-
-```bash
-cd src && make ZNS_ENGINE=append4k && cd ..
 sudo insmod src/dm-zns-base.ko
 
 SECTORS=$(sudo blockdev --getsz /dev/nullb0)
