@@ -15,6 +15,7 @@
 #include <linux/blkzoned.h>
 #include <linux/device-mapper.h>
 #include <linux/errno.h>
+#include <linux/highmem.h>
 #include <linux/list.h>
 #include <linux/module.h>
 #include <linux/random.h>
@@ -296,6 +297,86 @@ static int zns_lsm_read(struct zns_lsm *lsm, sector_t logical_sector,
 	return ret;
 }
 
+/* Copy one block fragment into the original bio without advancing its iterator. */
+static int zns_lsm_copy_read_fragment(struct bio *bio, unsigned int offset,
+				      const void *buffer, unsigned int bytes)
+{
+	struct bio_vec bv;
+	struct bvec_iter iter;
+	unsigned int copied = 0;
+
+	bio_for_each_segment(bv, bio, iter) {
+		unsigned int chunk;
+		void *mapped;
+
+		if (offset >= bv.bv_len) {
+			offset -= bv.bv_len;
+			continue;
+		}
+		chunk = min(bytes - copied, bv.bv_len - offset);
+		mapped = bvec_kmap_local(&bv);
+		memcpy((char *)mapped + offset, (const char *)buffer + copied,
+		       chunk);
+		kunmap_local(mapped);
+		flush_dcache_page(bv.bv_page);
+		copied += chunk;
+		if (copied == bytes)
+			return 0;
+		offset = 0;
+	}
+	return -EIO;
+}
+
+/*
+ * Read whole mapped blocks into a bounce buffer, then return only the requested
+ * bytes. This also handles a request straddling two independently mapped
+ * blocks. Run on io_wq so lookup, lower reads and copying cannot race writes.
+ */
+static int zns_lsm_read_partial(struct zns_lsm *lsm, struct bio *bio)
+{
+	sector_t sector = bio->bi_iter.bi_sector;
+	unsigned int remaining = bio_sectors(bio);
+	unsigned int bio_offset = 0;
+	void *buffer;
+	int ret = 0;
+
+	buffer = kmalloc(ZNS_SST_BLOCK_BYTES, GFP_NOIO);
+	if (!buffer)
+		return -ENOMEM;
+
+	while (remaining) {
+		unsigned int offset = sector % lsm->sectors_per_block;
+		unsigned int sectors = min_t(unsigned int, remaining,
+						lsm->sectors_per_block - offset);
+		unsigned int bytes = sectors << SECTOR_SHIFT;
+		sector_t physical_sector;
+
+		ret = zns_lsm_read(lsm, sector - offset,
+				   lsm->sectors_per_block, &physical_sector);
+		if (ret == -ENODATA) {
+			memset(buffer, 0, ZNS_SST_BLOCK_BYTES);
+		} else if (ret) {
+			break;
+		} else {
+			/* The shared helper submits any aligned 4 KiB block. */
+			ret = zns_meta_block_rw(lsm->lower_bdev, physical_sector,
+						REQ_OP_READ, buffer);
+			if (ret)
+				break;
+		}
+
+		ret = zns_lsm_copy_read_fragment(bio, bio_offset,
+				(char *)buffer + (offset << SECTOR_SHIFT), bytes);
+		if (ret)
+			break;
+		sector += sectors;
+		remaining -= sectors;
+		bio_offset += bytes;
+	}
+	kfree(buffer);
+	return ret;
+}
+
 static int zns_lsm_publish_write(struct zns_lsm *lsm, sector_t logical_sector,
 				 sector_t physical_sector)
 {
@@ -349,6 +430,13 @@ static void zns_lsm_io_worker(struct work_struct *work)
 	struct bio *clone;
 	sector_t physical_sector = 0;
 	int ret;
+
+	if (bio_op(bio) == REQ_OP_READ &&
+	    !zns_lsm_is_aligned_io(lsm, bio->bi_iter.bi_sector,
+				  bio_sectors(bio))) {
+		ret = zns_lsm_read_partial(lsm, bio);
+		goto complete;
+	}
 
 	clone = zns_lsm_clone_bio(lsm, bio);
 	if (!clone) {
@@ -776,6 +864,14 @@ int zns_engine_map(struct zns_engine *engine, struct bio *bio)
 	case REQ_OP_FLUSH:
 		return zns_lsm_queue_io(lsm, bio);
 	case REQ_OP_READ:
+		/* Logical sectors are 512 bytes; only writes still require 4 KiB. */
+		if (!bio->bi_iter.bi_size ||
+		    (bio->bi_iter.bi_size & ((1U << SECTOR_SHIFT) - 1)) ||
+		    bio->bi_iter.bi_sector >= lsm->super.logical_sectors ||
+		    bio_sectors(bio) > lsm->super.logical_sectors -
+						bio->bi_iter.bi_sector)
+			return DM_MAPIO_KILL;
+		return zns_lsm_queue_io(lsm, bio);
 	case REQ_OP_WRITE:
 		if (!zns_lsm_is_aligned_io(lsm, bio->bi_iter.bi_sector,
 					  bio_sectors(bio)))

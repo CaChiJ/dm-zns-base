@@ -86,6 +86,32 @@ This injection does not test actual device errors, partially advanced WPs, or
 MemTable allocation failures. Neither this change nor normal target restart
 provides crash recovery or durable fsync semantics.
 
+## M2 step 3: sub-block reads
+
+Reads now accept non-empty 512-byte multiples, including offsets inside a
+4 KiB logical block. Full aligned 4 KiB reads retain the existing clone path;
+other reads fetch each mapped 4 KiB block into a bounce buffer and copy the
+requested bytes into the original bio. Unmapped portions return zeros.
+Writes still require full aligned 4 KiB requests; sub-block RMW is step 4.
+
+Run on the disposable test-server device (the suites reset its zones):
+
+```bash
+sudo env UNDERLYING=/dev/nullb0 ZNS_ENGINE=lsm bash tests/run.sh \
+    smoke subblock-read ordered-io overwrite sstable-flush recovery m1
+```
+
+`subblock-read` compares direct reads against a random reference image for
+512 B, 1 KiB, 2 KiB and other sector-multiple sizes, plus full-block reads.
+It checks unaligned starts, crossing between independently mapped blocks,
+mapped-to-unmapped boundaries, and entirely unwritten reads. The same matrix
+runs with resident mappings, SSTable-only mappings, and after clean target
+recreation. DM may split a cross-boundary userspace read into multiple bios.
+
+This checkpoint can be used to retry the original 1 KiB read and investigate
+ext4 mount, but it is not ext4 roundtrip acceptance: partial writes are still
+unsupported. No local kernel or block-device experiments are required.
+
 ## Layout
 
 | Path | What lives there |
