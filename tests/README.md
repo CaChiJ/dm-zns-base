@@ -28,6 +28,30 @@ integration     11 passed    1 failed
 colours. `UNDERLYING` (default `/dev/nullb0`) and `ZNS_ENGINE` (default `lsm`)
 select the device and the engine under test.
 
+## M2 step 1: ordered I/O regression
+
+Run this checkpoint on the test server after copying the updated source tree.
+These suites reset all zones on `UNDERLYING`, so use the disposable test
+device, with any existing filesystem unmounted and existing zns-base targets
+removed first. Do not use a device containing data you need to keep.
+
+```bash
+sudo env UNDERLYING=/dev/nullb0 ZNS_ENGINE=lsm bash tests/run.sh \
+    smoke ordered-io overwrite sstable-flush recovery m1
+```
+
+Every selected case must pass. `ordered-io` checks unwritten reads, four
+concurrent writers on disjoint ranges with periodic fsync and CRC verification,
+and direct readback after an overwrite and fsync. These are functional
+regressions; they do not prove every possible interleaving or crash durability.
+
+At this checkpoint only full aligned 4 KiB data I/O is supported. Sub-block
+reads/writes and ext4 mounting are still expected to fail. Data mappings are
+still published before the lower write completes; changing that policy is the
+next checkpoint. Block-layer flushes share the data queue, but SSTable flushes
+retain their separate metadata queue. A successful fsync does not guarantee
+mapping persistence across a crash.
+
 ## Layout
 
 | Path | What lives there |

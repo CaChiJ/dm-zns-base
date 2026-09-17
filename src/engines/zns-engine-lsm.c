@@ -19,6 +19,7 @@
 #include <linux/module.h>
 #include <linux/random.h>
 #include <linux/slab.h>
+#include <linux/version.h>
 #include <linux/workqueue.h>
 
 #include "lsm-memtable.h"
@@ -64,11 +65,11 @@ struct zns_lsm {
 	struct zns_super super;
 
 	struct workqueue_struct *flush_wq;
-	struct workqueue_struct *read_wq;
+	struct workqueue_struct *io_wq;
 	struct work_struct flush_work;
 };
 
-struct zns_lsm_read_work {
+struct zns_lsm_io_work {
 	struct work_struct work;
 	struct zns_lsm *lsm;
 	struct bio *bio;
@@ -114,7 +115,7 @@ unlock:
 }
 
 /*
- * Sleeps on SSTable reads, so this only runs from the read workqueue. The list
+ * Sleeps on SSTable reads, so this only runs from the I/O workqueue. The list
  * is append-only in this milestone, but sst_lock is held for the whole walk so
  * that a concurrent flush cannot splice a new head underneath it.
  */
@@ -134,17 +135,6 @@ static int zns_lsm_lookup_sstables(struct zns_lsm *lsm, sector_t logical_block,
 	mutex_unlock(&lsm->sst_lock);
 
 	return ret;
-}
-
-static bool zns_lsm_has_sstables(struct zns_lsm *lsm)
-{
-	bool present;
-
-	mutex_lock(&lsm->sst_lock);
-	present = lsm->nr_sstables != 0;
-	mutex_unlock(&lsm->sst_lock);
-
-	return present;
 }
 
 static bool zns_lsm_is_aligned_io(const struct zns_lsm *lsm,
@@ -281,76 +271,20 @@ static void zns_lsm_flush_worker(struct work_struct *work)
 		zns_lsm_maybe_queue_flush(lsm);
 }
 
-static void zns_lsm_read_worker(struct work_struct *work)
-{
-	struct zns_lsm_read_work *ctx =
-		container_of(work, struct zns_lsm_read_work, work);
-	struct zns_lsm *lsm = ctx->lsm;
-	struct bio *bio = ctx->bio;
-	sector_t logical_block;
-	sector_t physical_sector;
-	int ret;
-
-	logical_block = bio->bi_iter.bi_sector / lsm->sectors_per_block;
-
-	/* Re-check: a flush may have moved the mapping since the .map() miss. */
-	ret = zns_lsm_lookup_memtables(lsm, logical_block, &physical_sector);
-	if (ret == -ENODATA)
-		ret = zns_lsm_lookup_sstables(lsm, logical_block,
-					      &physical_sector);
-
-	if (ret == -ENODATA) {
-		zero_fill_bio(bio);
-		bio_endio(bio);
-	} else if (ret) {
-		bio->bi_status = errno_to_blk_status(ret);
-		bio_endio(bio);
-	} else {
-		bio->bi_iter.bi_sector = physical_sector;
-		bio_set_dev(bio, lsm->lower_bdev);
-		submit_bio_noacct(bio);
-	}
-
-	kfree(ctx);
-}
-
-/*
- * SSTable lookups sleep on block reads, which .map() cannot do, so a MemTable
- * miss is handed to the read workqueue. Without any SSTable on disk the answer
- * is already known and the bio is completed here.
- */
-static int zns_lsm_queue_read(struct zns_lsm *lsm, struct bio *bio)
-{
-	struct zns_lsm_read_work *ctx;
-
-	if (!zns_lsm_has_sstables(lsm)) {
-		zero_fill_bio(bio);
-		bio_endio(bio);
-		return DM_MAPIO_SUBMITTED;
-	}
-
-	ctx = kmalloc(sizeof(*ctx), GFP_NOIO);
-	if (!ctx)
-		return DM_MAPIO_KILL;
-
-	INIT_WORK(&ctx->work, zns_lsm_read_worker);
-	ctx->lsm = lsm;
-	ctx->bio = bio;
-	queue_work(lsm->read_wq, &ctx->work);
-
-	return DM_MAPIO_SUBMITTED;
-}
-
 static int zns_lsm_read(struct zns_lsm *lsm, sector_t logical_sector,
 			unsigned int sectors, sector_t *physical_sector)
 {
 	sector_t logical_block;
+	int ret;
 
 	if (!zns_lsm_is_aligned_io(lsm, logical_sector, sectors))
 		return -EINVAL;
 
 	logical_block = logical_sector / lsm->sectors_per_block;
-	return zns_lsm_lookup_memtables(lsm, logical_block, physical_sector);
+	ret = zns_lsm_lookup_memtables(lsm, logical_block, physical_sector);
+	if (ret == -ENODATA)
+		ret = zns_lsm_lookup_sstables(lsm, logical_block, physical_sector);
+	return ret;
 }
 
 static int zns_lsm_write(struct zns_lsm *lsm, sector_t logical_sector,
@@ -377,6 +311,97 @@ static int zns_lsm_write(struct zns_lsm *lsm, sector_t logical_sector,
 
 	zns_lsm_maybe_queue_flush(lsm);
 	return 0;
+}
+
+/*
+ * Keep DM's original bio and completion callback intact. The clone shares its
+ * data pages, which remain alive until we complete the original bio below.
+ */
+static struct bio *zns_lsm_clone_bio(struct zns_lsm *lsm, struct bio *bio)
+{
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 18, 0)
+	return bio_alloc_clone(lsm->lower_bdev, bio, GFP_NOIO, &fs_bio_set);
+#else
+	struct bio *clone = bio_clone_fast(bio, GFP_NOIO, &fs_bio_set);
+
+	if (clone)
+		bio_set_dev(clone, lsm->lower_bdev);
+	return clone;
+#endif
+}
+
+/*
+ * One worker handles each data read, data write or block-layer flush. Waiting
+ * for lower completion is essential: merely submitting asynchronously from an
+ * ordered queue would still allow multiple lower writes to run concurrently.
+ * SSTable flushing stays on its own queue and writes only the metadata zone.
+ * Mapping publication before data completion is unchanged in this refactor.
+ */
+static void zns_lsm_io_worker(struct work_struct *work)
+{
+	struct zns_lsm_io_work *ctx =
+		container_of(work, struct zns_lsm_io_work, work);
+	struct zns_lsm *lsm = ctx->lsm;
+	struct bio *bio = ctx->bio;
+	struct bio *clone;
+	sector_t physical_sector = 0;
+	int ret;
+
+	clone = zns_lsm_clone_bio(lsm, bio);
+	if (!clone) {
+		ret = -ENOMEM;
+		goto complete;
+	}
+
+	switch (bio_op(bio)) {
+	case REQ_OP_READ:
+		ret = zns_lsm_read(lsm, bio->bi_iter.bi_sector,
+				   bio_sectors(bio), &physical_sector);
+		if (ret == -ENODATA) {
+			zero_fill_bio(bio);
+			ret = 0;
+			goto put_clone;
+		}
+		break;
+	case REQ_OP_WRITE:
+		ret = zns_lsm_write(lsm, bio->bi_iter.bi_sector,
+				    bio_sectors(bio), &physical_sector);
+		break;
+	case REQ_OP_FLUSH:
+		/* Preserve the existing lower-only flush semantics. */
+		ret = 0;
+		break;
+	default:
+		ret = -EOPNOTSUPP;
+		break;
+	}
+	if (ret)
+		goto put_clone;
+
+	clone->bi_iter.bi_sector = physical_sector;
+	ret = submit_bio_wait(clone);
+put_clone:
+	bio_put(clone);
+complete:
+	bio->bi_status = errno_to_blk_status(ret);
+	/* No engine access after completion: DM may now tear the target down. */
+	kfree(ctx);
+	bio_endio(bio);
+}
+
+static int zns_lsm_queue_io(struct zns_lsm *lsm, struct bio *bio)
+{
+	struct zns_lsm_io_work *ctx;
+
+	ctx = kmalloc(sizeof(*ctx), GFP_NOIO);
+	if (!ctx)
+		return DM_MAPIO_KILL;
+
+	INIT_WORK(&ctx->work, zns_lsm_io_worker);
+	ctx->lsm = lsm;
+	ctx->bio = bio;
+	queue_work(lsm->io_wq, &ctx->work);
+	return DM_MAPIO_SUBMITTED;
 }
 
 static void zns_lsm_free_sstables(struct zns_lsm *lsm)
@@ -595,8 +620,8 @@ int zns_engine_init(struct zns_engine *engine, struct block_device *lower_bdev,
 		goto free_memtable;
 	}
 
-	lsm->read_wq = alloc_workqueue("zns-lsm-read", WQ_MEM_RECLAIM, 0);
-	if (!lsm->read_wq) {
+	lsm->io_wq = alloc_ordered_workqueue("zns-lsm-io", WQ_MEM_RECLAIM);
+	if (!lsm->io_wq) {
 		ret = -ENOMEM;
 		goto destroy_flush_wq;
 	}
@@ -684,7 +709,7 @@ void zns_engine_exit(struct zns_engine *engine)
 		return;
 
 	/* Drain both queues before anything they reference goes away. */
-	destroy_workqueue(lsm->read_wq);
+	destroy_workqueue(lsm->io_wq);
 	destroy_workqueue(lsm->flush_wq);
 
 	/* Only now is nothing else writing, so the tables can be serialized. */
@@ -703,8 +728,6 @@ void zns_engine_exit(struct zns_engine *engine)
 int zns_engine_map(struct zns_engine *engine, struct bio *bio)
 {
 	struct zns_lsm *lsm;
-	sector_t physical_sector;
-	int ret;
 
 	if (!engine || !bio)
 		return DM_MAPIO_KILL;
@@ -715,28 +738,13 @@ int zns_engine_map(struct zns_engine *engine, struct bio *bio)
 
 	switch (bio_op(bio)) {
 	case REQ_OP_FLUSH:
-		bio_set_dev(bio, lsm->lower_bdev);
-		return DM_MAPIO_REMAPPED;
+		return zns_lsm_queue_io(lsm, bio);
 	case REQ_OP_READ:
-		ret = zns_lsm_read(lsm, bio->bi_iter.bi_sector,
-				   bio_sectors(bio), &physical_sector);
-		if (ret == -ENODATA)
-			return zns_lsm_queue_read(lsm, bio);
-		if (ret)
-			return DM_MAPIO_KILL;
-
-		bio->bi_iter.bi_sector = physical_sector;
-		bio_set_dev(bio, lsm->lower_bdev);
-		return DM_MAPIO_REMAPPED;
 	case REQ_OP_WRITE:
-		ret = zns_lsm_write(lsm, bio->bi_iter.bi_sector,
-				    bio_sectors(bio), &physical_sector);
-		if (ret)
+		if (!zns_lsm_is_aligned_io(lsm, bio->bi_iter.bi_sector,
+					  bio_sectors(bio)))
 			return DM_MAPIO_KILL;
-
-		bio->bi_iter.bi_sector = physical_sector;
-		bio_set_dev(bio, lsm->lower_bdev);
-		return DM_MAPIO_REMAPPED;
+		return zns_lsm_queue_io(lsm, bio);
 	default:
 		return DM_MAPIO_KILL;
 	}
