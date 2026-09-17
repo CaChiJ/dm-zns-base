@@ -177,6 +177,33 @@ bio crossed a mapping boundary inside the engine.
 This is clean target recovery, not crash recovery or ext4 roundtrip acceptance.
 Step 6 remains the ext4 mount/write/unmount/remount/hash checkpoint.
 
+## M2 step 6: ext4 roundtrip acceptance
+
+Run on the test server after step 5 passes. `/dev/nullb0` must already exist
+(create it with `sudo bash scripts/nullblk-up.sh` if needed). This suite resets
+all zones on `UNDERLYING` and formats its own DM target; use disposable media.
+
+```bash
+sudo env UNDERLYING=/dev/nullb0 ZNS_ENGINE=lsm bash tests/run.sh m2
+```
+
+`m2` checks a conventional upper device, creates journaled ext4 with 4 KiB
+blocks, writes exactly 10 MiB of random data, records its MD5, runs `sync`,
+unmounts, mounts again, and compares the file size and MD5. The same DM target
+stays live between mounts: there is no target recreation, module reload, or
+zone reset in that interval. It then unmounts, removes the target, and checks
+for new kernel I/O, ext4, and journal errors. All four cases must pass.
+
+The suite uses `nodiscard` because discard is unsupported, and disables lazy
+inode-table/journal initialization during mkfs for a bounded initialization
+phase. The journal and default mount barriers remain enabled. It requires
+`mkfs.ext4` (e2fsprogs), mount/umount, and the standard test tools. Cleanup
+unmounts before removing the target or temporary directory; if unmount fails,
+it reports and preserves those resources for inspection.
+
+This verifies the M2 filesystem roundtrip, not crash recovery, durable mapping
+fsync, or filesystem recovery after target recreation.
+
 ## Layout
 
 | Path | What lives there |
@@ -184,7 +211,7 @@ Step 6 remains the ext4 mount/write/unmount/remount/hash checkpoint.
 | `lib/` | Shared fixtures: reporting, preconditions, DM target lifecycle, assertions |
 | `unit/` | In-kernel tests. Each module includes the source file under test directly |
 | `integration/` | One DM target per suite, driven through real block I/O including sub-block ranges |
-| `acceptance/` | Milestone judgement. `m1.sh` decides whether M1 in `docs/07-milestones.md` is met |
+| `acceptance/` | Milestone judgement: `m1.sh` checks raw random writes; `m2.sh` checks the ext4 roundtrip |
 
 ## Conventions
 
@@ -262,7 +289,7 @@ file up automatically.
 
 ## Not covered
 
-ext4 mkfs/mount round trips, crash consistency, SSTable payload CRC
+Crash consistency, SSTable payload CRC
 verification, the reserved-zone `-ENOSPC` path, discard and write-zeroes,
 allocator rollback after a failed physical write, real GC and zone reuse, and
 long-running read/write races or performance numbers.
