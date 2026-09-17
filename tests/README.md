@@ -45,12 +45,46 @@ concurrent writers on disjoint ranges with periodic fsync and CRC verification,
 and direct readback after an overwrite and fsync. These are functional
 regressions; they do not prove every possible interleaving or crash durability.
 
-At this checkpoint only full aligned 4 KiB data I/O is supported. Sub-block
+At step 1 only full aligned 4 KiB data I/O is supported. Sub-block
 reads/writes and ext4 mounting are still expected to fail. Data mappings are
 still published before the lower write completes; changing that policy is the
 next checkpoint. Block-layer flushes share the data queue, but SSTable flushes
 retain their separate metadata queue. A successful fsync does not guarantee
 mapping persistence across a crash.
+
+## M2 step 2: publish after successful writes
+
+Data mappings are now published only after the lower write succeeds. On a
+lower data write error the old mapping stays readable and `writes_stopped=1`
+appears in target status. Further data writes fail until normal target
+recreation reloads actual zone write pointers. Reads and metadata shutdown
+flushing remain available. This deliberately avoids guessing whether a failed
+write consumed its reserved sectors.
+
+If data succeeds but MemTable insertion fails, the write returns an error and
+the old mapping remains. The consumed physical block is not reclaimed, and
+later writes can continue because the physical WP is known to have advanced.
+
+Run on the disposable test-server device (these suites reset its zones):
+
+```bash
+sudo env UNDERLYING=/dev/nullb0 ZNS_ENGINE=lsm bash tests/run.sh \
+    smoke ordered-io overwrite sstable-flush recovery write-failure m1
+sudo env UNDERLYING=/dev/nullb0 ZNS_ENGINE=lsm TEST_THRESHOLD=1 \
+    bash tests/run.sh write-failure
+```
+
+`write-failure` loads the module with `fail_data_write_at=2`, a read-only module
+parameter disabled by default. It simulates failure of the second allocated
+data write per target, before lower submission; metadata I/O is unaffected.
+It checks the old mapping, rejection of subsequent writes, and recovery and
+successful overwrite across clean target restarts. The second command repeats
+the test with the old mapping in an SSTable instead of the active MemTable.
+Expected I/O errors are not counted as failures in this injection suite.
+
+This injection does not test actual device errors, partially advanced WPs, or
+MemTable allocation failures. Neither this change nor normal target restart
+provides crash recovery or durable fsync semantics.
 
 ## Layout
 

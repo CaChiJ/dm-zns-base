@@ -39,6 +39,12 @@ module_param_named(memtable_threshold, zns_lsm_memtable_threshold, uint, 0444);
 MODULE_PARM_DESC(memtable_threshold,
 		 "Number of active MemTable entries that triggers a freeze");
 
+/* Test-only: simulate a lower write error after allocation, before submission. */
+static unsigned int zns_lsm_fail_data_write_at;
+module_param_named(fail_data_write_at, zns_lsm_fail_data_write_at, uint, 0444);
+MODULE_PARM_DESC(fail_data_write_at,
+		 "Fail the Nth allocated data write per target before submission (0=off)");
+
 struct zns_lsm {
 	struct block_device *lower_bdev;
 	struct zns_zone_table zone_table;
@@ -52,6 +58,9 @@ struct zns_lsm {
 	bool flush_in_flight;
 	unsigned int memtable_threshold;
 	sector_t sectors_per_block;
+	/* Only the ordered I/O worker changes these fields. */
+	u64 data_write_attempts;
+	bool writes_stopped;
 
 	/* Reserved metadata zone and its SSTables, all guarded by sst_lock. */
 	struct mutex sst_lock;
@@ -287,25 +296,18 @@ static int zns_lsm_read(struct zns_lsm *lsm, sector_t logical_sector,
 	return ret;
 }
 
-static int zns_lsm_write(struct zns_lsm *lsm, sector_t logical_sector,
-			 unsigned int sectors, sector_t *physical_sector)
+static int zns_lsm_publish_write(struct zns_lsm *lsm, sector_t logical_sector,
+				 sector_t physical_sector)
 {
 	sector_t logical_block;
 	int ret;
 
-	if (!zns_lsm_is_aligned_io(lsm, logical_sector, sectors))
-		return -EINVAL;
-
 	logical_block = logical_sector / lsm->sectors_per_block;
-	ret = zns_allocator_alloc(&lsm->allocator, physical_sector);
-	if (ret)
-		return ret;
-
 	ret = memtable_put_active(&lsm->active_memtable,
 				  &lsm->immutable_memtable,
 				  &lsm->table_lock,
 				  lsm->memtable_threshold,
-				  logical_block, *physical_sector);
+				  logical_block, physical_sector);
 	if (ret)
 		return ret;
 
@@ -335,7 +337,8 @@ static struct bio *zns_lsm_clone_bio(struct zns_lsm *lsm, struct bio *bio)
  * for lower completion is essential: merely submitting asynchronously from an
  * ordered queue would still allow multiple lower writes to run concurrently.
  * SSTable flushing stays on its own queue and writes only the metadata zone.
- * Mapping publication before data completion is unchanged in this refactor.
+ * Publish a data mapping only after successful lower completion, before the
+ * next queued read or write runs. Background flush cannot see pending writes.
  */
 static void zns_lsm_io_worker(struct work_struct *work)
 {
@@ -364,8 +367,11 @@ static void zns_lsm_io_worker(struct work_struct *work)
 		}
 		break;
 	case REQ_OP_WRITE:
-		ret = zns_lsm_write(lsm, bio->bi_iter.bi_sector,
-				    bio_sectors(bio), &physical_sector);
+		if (lsm->writes_stopped) {
+			ret = -EIO;
+			goto put_clone;
+		}
+		ret = zns_allocator_alloc(&lsm->allocator, &physical_sector);
 		break;
 	case REQ_OP_FLUSH:
 		/* Preserve the existing lower-only flush semantics. */
@@ -379,7 +385,37 @@ static void zns_lsm_io_worker(struct work_struct *work)
 		goto put_clone;
 
 	clone->bi_iter.bi_sector = physical_sector;
+	if (bio_op(bio) == REQ_OP_WRITE)
+		lsm->data_write_attempts++;
+	if (bio_op(bio) == REQ_OP_WRITE && zns_lsm_fail_data_write_at &&
+	    lsm->data_write_attempts == zns_lsm_fail_data_write_at) {
+		DMWARN("injecting data write failure before submission at sector %llu",
+		       (unsigned long long)physical_sector);
+		ret = -EIO;
+		goto lower_done;
+	}
 	ret = submit_bio_wait(clone);
+lower_done:
+	if (bio_op(bio) == REQ_OP_WRITE) {
+		if (ret) {
+			/*
+			 * The reserved sector may or may not have reached the device.
+			 * Keep the old mapping and stop data writes until target
+			 * recreation reloads actual zone WPs. Never guess a rollback.
+			 */
+			WRITE_ONCE(lsm->writes_stopped, true);
+			DMERR("data write failed at sector %llu (%d); data writes stopped until target recreation",
+			      (unsigned long long)physical_sector, ret);
+		} else {
+			ret = zns_lsm_publish_write(lsm, bio->bi_iter.bi_sector,
+						    physical_sector);
+			/*
+			 * On insertion failure the previous mapping is untouched.
+			 * The lower write succeeded, so retain the advanced allocator
+			 * WP; the unmapped physical block cannot be reused here.
+			 */
+		}
+	}
 put_clone:
 	bio_put(clone);
 complete:
@@ -776,9 +812,9 @@ void zns_engine_status(struct zns_engine *engine, char *result,
 	meta_used = lsm->meta_wp - lsm->meta_start;
 	mutex_unlock(&lsm->sst_lock);
 
-	DMEMIT("lsm active=%u immutable=%u flushing=%u sstables=%u sst_entries=%llu meta_used=%llu",
+	DMEMIT("lsm active=%u immutable=%u flushing=%u sstables=%u sst_entries=%llu meta_used=%llu writes_stopped=%u",
 	       active, immutable, flushing, nr_sstables, nr_sst_entries,
-	       meta_used);
+	       meta_used, (unsigned int)READ_ONCE(lsm->writes_stopped));
 }
 
 const char *zns_engine_name(void)

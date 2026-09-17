@@ -27,3 +27,4 @@ Module.symvers
 
 # Local Codex instructions and connection details
 /AGENTS.md
+/.local-skills/devlog/
