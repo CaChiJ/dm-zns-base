@@ -153,13 +153,37 @@ The existing `randwrite-matrix` suite can now exercise successful 1 KiB and
 2 KiB writes as well, but workload completion alone does not verify untouched
 bytes; use the reference-image tests above for that property.
 
+## M2 step 5: sub-block mapping lifecycle
+
+Run on the disposable test-server device; these suites reset all its zones:
+
+```bash
+sudo env UNDERLYING=/dev/nullb0 ZNS_ENGINE=lsm bash tests/run.sh \
+    smoke subblock-read subblock-write subblock-lifecycle ordered-io \
+    overwrite sstable-flush recovery write-failure m1
+```
+
+`subblock-lifecycle` maintains one random reference image across partial
+updates in the MemTable, a threshold-triggered flush, overlapping RMW updates
+whose originals exist only in SSTables, and a second flush. It checks resident
+mapping precedence and newest-SSTable precedence, then recreates the target
+without resetting zones. Further partial updates remain resident until another
+clean restart exercises shutdown flushing. Each checkpoint compares the whole
+image (including untouched bytes and a hole) and direct sub-block reads.
+Status checks confirm the intended mapping location; flush waits are bounded.
+DM may split cross-block requests, so these checks do not prove that a single
+bio crossed a mapping boundary inside the engine.
+
+This is clean target recovery, not crash recovery or ext4 roundtrip acceptance.
+Step 6 remains the ext4 mount/write/unmount/remount/hash checkpoint.
+
 ## Layout
 
 | Path | What lives there |
 |---|---|
 | `lib/` | Shared fixtures: reporting, preconditions, DM target lifecycle, assertions |
 | `unit/` | In-kernel tests. Each module includes the source file under test directly |
-| `integration/` | One DM target per suite, driven through real 4 KiB block I/O |
+| `integration/` | One DM target per suite, driven through real block I/O including sub-block ranges |
 | `acceptance/` | Milestone judgement. `m1.sh` decides whether M1 in `docs/07-milestones.md` is met |
 
 ## Conventions
