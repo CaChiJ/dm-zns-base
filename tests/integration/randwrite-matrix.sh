@@ -48,8 +48,7 @@ run_case "when 4 KiB randwrites cover 32 MiB, the append continues" \
 run_case "when 4 KiB randwrites cover 100 MiB, the append continues" \
 	case_sweep 100M 4k 32
 
-# Sub-4 KiB requests are a real capability question, not an environment one:
-# only rmw4k merges them, so append4k and lsm fail these two cases and say so.
+# LSM merges sub-4 KiB writes with RMW; append4k still rejects these sizes.
 run_case "when requests are 1 KiB, randwrites complete" \
 	case_sweep 64M 1k 8
 run_case "when requests are 2 KiB, randwrites complete" \

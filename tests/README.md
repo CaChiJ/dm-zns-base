@@ -112,6 +112,47 @@ This checkpoint can be used to retry the original 1 KiB read and investigate
 ext4 mount, but it is not ext4 roundtrip acceptance: partial writes are still
 unsupported. No local kernel or block-device experiments are required.
 
+## M2 step 4: sub-block writes (RMW)
+
+Sector-aligned partial writes now read the existing 4 KiB block (or start from
+zeros for a hole), merge only the requested range, append a full block, and
+publish its mapping after success. Full-block and partial writes share the
+same ordered queue, append helper, and stop-on-write-error policy. Original
+write flags including PREFLUSH/FUA are passed to the lower write. This does
+not add durable mapping fsync or crash recovery.
+
+Cross-block writes are handled per block. They are not atomic transactions:
+if a later fragment fails, earlier successful fragments remain published.
+
+Run on the disposable test-server device; each suite resets its zones:
+
+```bash
+sudo env UNDERLYING=/dev/nullb0 ZNS_ENGINE=lsm bash tests/run.sh \
+    smoke subblock-read subblock-write ordered-io overwrite \
+    sstable-flush recovery write-failure m1
+
+# Fail a 1 KiB overwrite inside a mapped block, preserving all 4 KiB.
+sudo env UNDERLYING=/dev/nullb0 ZNS_ENGINE=lsm WRITE_BYTES=1024 WRITE_OFFSET=1024 \
+    bash tests/run.sh write-failure
+
+# Repeat when the old mapping exists only in an SSTable.
+sudo env UNDERLYING=/dev/nullb0 ZNS_ENGINE=lsm TEST_THRESHOLD=1 \
+    WRITE_BYTES=1024 WRITE_OFFSET=1024 bash tests/run.sh write-failure
+```
+
+`subblock-write` compares whole reference images after partial updates,
+including cross-block requests and unwritten holes. It also checks eight
+concurrent 512 B writers on disjoint sectors of the same block, and alternating
+full/partial overwrites. The failure suite defaults to its previous 4 KiB
+workload; WRITE_BYTES/WRITE_OFFSET select a single-block partial write instead.
+The injected error remains a simulated pre-submission failure, not a real
+device error. A successful retry after recreation verifies the new bytes and
+all untouched bytes again, including after a further restart.
+
+The existing `randwrite-matrix` suite can now exercise successful 1 KiB and
+2 KiB writes as well, but workload completion alone does not verify untouched
+bytes; use the reference-image tests above for that property.
+
 ## Layout
 
 | Path | What lives there |

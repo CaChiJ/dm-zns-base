@@ -297,9 +297,9 @@ static int zns_lsm_read(struct zns_lsm *lsm, sector_t logical_sector,
 	return ret;
 }
 
-/* Copy one block fragment into the original bio without advancing its iterator. */
-static int zns_lsm_copy_read_fragment(struct bio *bio, unsigned int offset,
-				      const void *buffer, unsigned int bytes)
+/* Copy a block fragment to/from the bio without advancing its iterator. */
+static int zns_lsm_copy_fragment(struct bio *bio, unsigned int offset,
+			       void *buffer, unsigned int bytes, bool to_bio)
 {
 	struct bio_vec bv;
 	struct bvec_iter iter;
@@ -315,10 +315,13 @@ static int zns_lsm_copy_read_fragment(struct bio *bio, unsigned int offset,
 		}
 		chunk = min(bytes - copied, bv.bv_len - offset);
 		mapped = bvec_kmap_local(&bv);
-		memcpy((char *)mapped + offset, (const char *)buffer + copied,
-		       chunk);
+		if (to_bio)
+			memcpy((char *)mapped + offset, (char *)buffer + copied, chunk);
+		else
+			memcpy((char *)buffer + copied, (char *)mapped + offset, chunk);
 		kunmap_local(mapped);
-		flush_dcache_page(bv.bv_page);
+		if (to_bio)
+			flush_dcache_page(bv.bv_page);
 		copied += chunk;
 		if (copied == bytes)
 			return 0;
@@ -365,8 +368,8 @@ static int zns_lsm_read_partial(struct zns_lsm *lsm, struct bio *bio)
 				break;
 		}
 
-		ret = zns_lsm_copy_read_fragment(bio, bio_offset,
-				(char *)buffer + (offset << SECTOR_SHIFT), bytes);
+		ret = zns_lsm_copy_fragment(bio, bio_offset,
+				(char *)buffer + (offset << SECTOR_SHIFT), bytes, true);
 		if (ret)
 			break;
 		sector += sectors;
@@ -394,6 +397,100 @@ static int zns_lsm_publish_write(struct zns_lsm *lsm, sector_t logical_sector,
 
 	zns_lsm_maybe_queue_flush(lsm);
 	return 0;
+}
+
+/*
+ * Shared full-block append for normal writes and RMW. Exactly one of clone
+ * and buffer is supplied. Only the ordered I/O worker calls this function.
+ */
+static int zns_lsm_append_write(struct zns_lsm *lsm, sector_t logical_sector,
+			      struct bio *clone, void *buffer, unsigned int opf)
+{
+	sector_t physical_sector;
+	int ret;
+
+	if (lsm->writes_stopped)
+		return -EIO;
+	ret = zns_allocator_alloc(&lsm->allocator, &physical_sector);
+	if (ret)
+		return ret;
+
+	lsm->data_write_attempts++;
+	if (zns_lsm_fail_data_write_at &&
+	    lsm->data_write_attempts == zns_lsm_fail_data_write_at) {
+		DMWARN("injecting data write failure before submission at sector %llu",
+		       (unsigned long long)physical_sector);
+		ret = -EIO;
+	} else if (clone) {
+		clone->bi_iter.bi_sector = physical_sector;
+		ret = submit_bio_wait(clone);
+	} else {
+		ret = zns_meta_block_rw(lsm->lower_bdev, physical_sector, opf, buffer);
+	}
+	if (ret) {
+		/* Unknown lower WP: retain the old mapping and never guess rollback. */
+		WRITE_ONCE(lsm->writes_stopped, true);
+		DMERR("data write failed at sector %llu (%d); data writes stopped until target recreation",
+		      (unsigned long long)physical_sector, ret);
+		return ret;
+	}
+
+	/* Insertion failure leaves the old mapping and consumes the written space. */
+	return zns_lsm_publish_write(lsm, logical_sector, physical_sector);
+}
+
+static int zns_lsm_write_partial(struct zns_lsm *lsm, struct bio *bio)
+{
+	sector_t sector = bio->bi_iter.bi_sector;
+	unsigned int remaining = bio_sectors(bio);
+	unsigned int bio_offset = 0;
+	void *buffer;
+	int ret = 0;
+
+	if (lsm->writes_stopped)
+		return -EIO;
+	buffer = kmalloc(ZNS_SST_BLOCK_BYTES, GFP_NOIO);
+	if (!buffer)
+		return -ENOMEM;
+
+	while (remaining) {
+		unsigned int offset = sector % lsm->sectors_per_block;
+		unsigned int sectors = min_t(unsigned int, remaining,
+						lsm->sectors_per_block - offset);
+		unsigned int bytes = sectors << SECTOR_SHIFT;
+		sector_t physical_sector;
+
+		/* A full fragment overwrites the entire buffer and needs no read. */
+		if (offset || sectors != lsm->sectors_per_block) {
+			ret = zns_lsm_read(lsm, sector - offset,
+					   lsm->sectors_per_block, &physical_sector);
+			if (ret == -ENODATA) {
+				memset(buffer, 0, ZNS_SST_BLOCK_BYTES);
+			} else if (ret) {
+				break;
+			} else {
+				ret = zns_meta_block_rw(lsm->lower_bdev, physical_sector,
+							REQ_OP_READ, buffer);
+				if (ret)
+					break;
+			}
+		}
+		ret = zns_lsm_copy_fragment(bio, bio_offset,
+				(char *)buffer + (offset << SECTOR_SHIFT), bytes, false);
+		if (ret)
+			break;
+		/* Preserve write flags, including PREFLUSH/FUA, on the lower write. */
+		ret = zns_lsm_append_write(lsm, sector - offset, NULL, buffer,
+					   bio->bi_opf);
+		if (ret)
+			break;
+		sector += sectors;
+		remaining -= sectors;
+		bio_offset += bytes;
+	}
+	/* Multi-block requests are not transactions: earlier fragments may succeed. */
+	kfree(buffer);
+	return ret;
 }
 
 /*
@@ -431,10 +528,11 @@ static void zns_lsm_io_worker(struct work_struct *work)
 	sector_t physical_sector = 0;
 	int ret;
 
-	if (bio_op(bio) == REQ_OP_READ &&
+	if ((bio_op(bio) == REQ_OP_READ || bio_op(bio) == REQ_OP_WRITE) &&
 	    !zns_lsm_is_aligned_io(lsm, bio->bi_iter.bi_sector,
 				  bio_sectors(bio))) {
-		ret = zns_lsm_read_partial(lsm, bio);
+		ret = bio_op(bio) == REQ_OP_READ ? zns_lsm_read_partial(lsm, bio) :
+			zns_lsm_write_partial(lsm, bio);
 		goto complete;
 	}
 
@@ -455,12 +553,9 @@ static void zns_lsm_io_worker(struct work_struct *work)
 		}
 		break;
 	case REQ_OP_WRITE:
-		if (lsm->writes_stopped) {
-			ret = -EIO;
-			goto put_clone;
-		}
-		ret = zns_allocator_alloc(&lsm->allocator, &physical_sector);
-		break;
+		ret = zns_lsm_append_write(lsm, bio->bi_iter.bi_sector, clone,
+					   NULL, bio->bi_opf);
+		goto put_clone;
 	case REQ_OP_FLUSH:
 		/* Preserve the existing lower-only flush semantics. */
 		ret = 0;
@@ -473,37 +568,7 @@ static void zns_lsm_io_worker(struct work_struct *work)
 		goto put_clone;
 
 	clone->bi_iter.bi_sector = physical_sector;
-	if (bio_op(bio) == REQ_OP_WRITE)
-		lsm->data_write_attempts++;
-	if (bio_op(bio) == REQ_OP_WRITE && zns_lsm_fail_data_write_at &&
-	    lsm->data_write_attempts == zns_lsm_fail_data_write_at) {
-		DMWARN("injecting data write failure before submission at sector %llu",
-		       (unsigned long long)physical_sector);
-		ret = -EIO;
-		goto lower_done;
-	}
 	ret = submit_bio_wait(clone);
-lower_done:
-	if (bio_op(bio) == REQ_OP_WRITE) {
-		if (ret) {
-			/*
-			 * The reserved sector may or may not have reached the device.
-			 * Keep the old mapping and stop data writes until target
-			 * recreation reloads actual zone WPs. Never guess a rollback.
-			 */
-			WRITE_ONCE(lsm->writes_stopped, true);
-			DMERR("data write failed at sector %llu (%d); data writes stopped until target recreation",
-			      (unsigned long long)physical_sector, ret);
-		} else {
-			ret = zns_lsm_publish_write(lsm, bio->bi_iter.bi_sector,
-						    physical_sector);
-			/*
-			 * On insertion failure the previous mapping is untouched.
-			 * The lower write succeeded, so retain the advanced allocator
-			 * WP; the unmapped physical block cannot be reused here.
-			 */
-		}
-	}
 put_clone:
 	bio_put(clone);
 complete:
@@ -864,17 +929,13 @@ int zns_engine_map(struct zns_engine *engine, struct bio *bio)
 	case REQ_OP_FLUSH:
 		return zns_lsm_queue_io(lsm, bio);
 	case REQ_OP_READ:
-		/* Logical sectors are 512 bytes; only writes still require 4 KiB. */
+	case REQ_OP_WRITE:
+		/* Logical sectors are 512 bytes; physical appends remain 4 KiB. */
 		if (!bio->bi_iter.bi_size ||
 		    (bio->bi_iter.bi_size & ((1U << SECTOR_SHIFT) - 1)) ||
 		    bio->bi_iter.bi_sector >= lsm->super.logical_sectors ||
 		    bio_sectors(bio) > lsm->super.logical_sectors -
 						bio->bi_iter.bi_sector)
-			return DM_MAPIO_KILL;
-		return zns_lsm_queue_io(lsm, bio);
-	case REQ_OP_WRITE:
-		if (!zns_lsm_is_aligned_io(lsm, bio->bi_iter.bi_sector,
-					  bio_sectors(bio)))
 			return DM_MAPIO_KILL;
 		return zns_lsm_queue_io(lsm, bio);
 	default:

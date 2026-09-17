@@ -6,6 +6,8 @@ set -euo pipefail
 TARGET_NAME=${TARGET_NAME:-zns-write-failure}
 ZNS_REQUIRED_ENGINE=lsm
 TEST_THRESHOLD=${TEST_THRESHOLD:-64}
+WRITE_BYTES=${WRITE_BYTES:-4096}
+WRITE_OFFSET=${WRITE_OFFSET:-0}
 TESTS_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 source "$TESTS_DIR/lib/init.sh"
 
@@ -13,6 +15,13 @@ report_init "integration/write-failure"
 require_root
 require_commands make dmsetup blkzone blockdev dd cmp
 require_host_managed
+[[ "$WRITE_BYTES" =~ ^[0-9]+$ && "$WRITE_OFFSET" =~ ^[0-9]+$ ]] ||
+	die "WRITE_BYTES and WRITE_OFFSET must be decimal integers"
+WRITE_BYTES=$((10#$WRITE_BYTES))
+WRITE_OFFSET=$((10#$WRITE_OFFSET))
+(( WRITE_BYTES > 0 && WRITE_BYTES % 512 == 0 && WRITE_OFFSET % 512 == 0 &&
+   WRITE_OFFSET + WRITE_BYTES <= 4096 )) ||
+	die "the failed write must be sector-aligned and fit inside one 4 KiB block"
 trap teardown_target EXIT
 tmp_dir=$(mktemp -d)
 
@@ -25,6 +34,9 @@ require_status_fields writes_stopped
 make_pattern_file "$tmp_dir/a" A
 make_pattern_file "$tmp_dir/b" B
 make_zero_file "$tmp_dir/zero"
+dd if="$tmp_dir/a" of="$tmp_dir/expected" bs=4096 count=1 status=none
+dd if="$tmp_dir/b" of="$tmp_dir/expected" bs=1 count="$WRITE_BYTES" \
+	seek="$WRITE_OFFSET" conv=notrunc status=none
 write_block "$tmp_dir/a" 0
 
 # With threshold=1, ensure the old mapping lives only in an SSTable before
@@ -40,8 +52,9 @@ fi
 
 expect_write_failure() {
 	local lba=$1
-	if dd if="$tmp_dir/b" of="$DM_DEV" bs=4096 seek="$lba" count=1 \
-		oflag=direct conv=notrunc status=none 2>"$tmp_dir/expected-error"; then
+	if dd if="$tmp_dir/b" of="$DM_DEV" bs="$WRITE_BYTES" \
+		seek="$((lba * 4096 + WRITE_OFFSET))" count=1 \
+		oflag=direct,seek_bytes conv=notrunc status=none 2>"$tmp_dir/expected-error"; then
 		fail "write unexpectedly succeeded at logical block $lba"
 	fi
 }
@@ -80,14 +93,15 @@ run_case "when the target restarts, data writes are enabled again" \
 	assert_eq "$(status_field writes_stopped)" 0
 
 case_resumed_write() {
-	write_block "$tmp_dir/b" 0
-	assert_block "$tmp_dir/b" 0
+	dd if="$tmp_dir/b" of="$DM_DEV" bs="$WRITE_BYTES" seek="$WRITE_OFFSET" \
+		count=1 oflag=direct,seek_bytes conv=notrunc status=none
+	assert_block "$tmp_dir/expected" 0
 }
 run_case "when writing resumes from the reported WP, an overwrite succeeds" \
 	case_resumed_write
 recreate_dm_target
 run_case "when the target restarts again, the successful overwrite survives" \
-	assert_block "$tmp_dir/b" 0
+	assert_block "$tmp_dir/expected" 0
 
 # I/O errors are intentional in this suite; the normal regression suites
 # continue to enforce that their workloads emit no new I/O errors.
