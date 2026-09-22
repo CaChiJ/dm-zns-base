@@ -428,10 +428,26 @@ static int zns_lsm_append_write(struct zns_lsm *lsm, sector_t logical_sector,
 		ret = zns_meta_block_rw(lsm->lower_bdev, physical_sector, opf, buffer);
 	}
 	if (ret) {
-		/* Unknown lower WP: retain the old mapping and never guess rollback. */
+		struct zns_zone reported;
+		int recovery_ret;
+
 		WRITE_ONCE(lsm->writes_stopped, true);
-		DMERR("data write failed at sector %llu (%d); data writes stopped until target recreation",
-		      (unsigned long long)physical_sector, ret);
+		/* Ordered worker: no next data write can race this report/update. */
+		recovery_ret = zns_zone_report_one(lsm->lower_bdev, physical_sector,
+						   &reported);
+		if (!recovery_ret)
+			recovery_ret = zns_allocator_resync(&lsm->allocator,
+							    physical_sector, &reported);
+		if (!recovery_ret) {
+			WRITE_ONCE(lsm->writes_stopped, false);
+			DMWARN("data write failed at sector %llu (%d); WP resynced to %llu, subsequent writes enabled",
+			       (unsigned long long)physical_sector, ret,
+			       (unsigned long long)reported.write_pointer);
+		} else {
+			DMERR("data write failed at sector %llu (%d); WP resync failed (%d), data writes stopped until target recreation",
+			      (unsigned long long)physical_sector, ret, recovery_ret);
+		}
+		/* Recovery enables future writes; never publish this failed write. */
 		return ret;
 	}
 

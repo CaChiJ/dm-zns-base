@@ -33,5 +33,8 @@ int zns_allocator_init_zoned(struct zns_allocator *allocator,
 void zns_allocator_exit(struct zns_allocator *allocator);
 int zns_allocator_alloc(struct zns_allocator *allocator,
 			sector_t *physical_sector);
+/* Caller must serialize allocation and lower writes across report and resync. */
+int zns_allocator_resync(struct zns_allocator *allocator,
+			 sector_t failed_sector, const struct zns_zone *reported);
 
 #endif

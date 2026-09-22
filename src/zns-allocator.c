@@ -102,6 +102,66 @@ void zns_allocator_exit(struct zns_allocator *allocator)
 	zns_allocator_reset(allocator);
 }
 
+int zns_allocator_resync(struct zns_allocator *allocator,
+			 sector_t failed_sector, const struct zns_zone *reported)
+{
+	struct zns_zone *zone;
+	sector_t end, block = allocator->sectors_per_block;
+	unsigned int i;
+	int ret = -EIO;
+
+	spin_lock(&allocator->lock);
+	if (allocator->mode != ZNS_ALLOCATOR_ZONED || !block)
+		goto out;
+	for (i = 0; i < allocator->nr_zones; i++)
+		if (allocator->zones[i].start_sector == reported->start_sector)
+			break;
+	if (i == allocator->nr_zones)
+		goto out;
+	zone = &allocator->zones[i];
+	if (reported->length != zone->length ||
+	    reported->capacity != zone->capacity ||
+	    !zns_zone_metadata_valid(reported))
+		goto out;
+	end = zone->start_sector + zone->capacity;
+	if (failed_sector < zone->start_sector || failed_sector > end ||
+	    block > end - failed_sector || failed_sector % block ||
+	    zone->write_pointer != failed_sector + block)
+		goto out;
+	/* Only an unchanged WP or consumption of this one block is recoverable. */
+	if (reported->write_pointer != failed_sector &&
+	    reported->write_pointer != failed_sector + block)
+		goto out;
+	switch (reported->condition) {
+	case BLK_ZONE_COND_EMPTY:
+		if (reported->write_pointer != zone->start_sector)
+			goto out;
+		break;
+	case BLK_ZONE_COND_IMP_OPEN:
+	case BLK_ZONE_COND_EXP_OPEN:
+	case BLK_ZONE_COND_CLOSED:
+		break;
+	case BLK_ZONE_COND_FULL:
+		if (reported->write_pointer != end)
+			goto out;
+		break;
+	default:
+		goto out;
+	}
+	zone->write_pointer = reported->write_pointer;
+	zone->condition = reported->condition;
+	zone->active = reported->active;
+	/* Allocation may already have advanced past the failed zone's last slot. */
+	allocator->active_zone = i;
+	if (zone->condition == BLK_ZONE_COND_FULL ||
+	    block > end - zone->write_pointer)
+		allocator->active_zone++;
+	ret = 0;
+out:
+	spin_unlock(&allocator->lock);
+	return ret;
+}
+
 static int zns_allocator_alloc_zoned(struct zns_allocator *allocator,
 				     sector_t *physical_sector)
 {

@@ -463,7 +463,70 @@ free_results:
 	return ret;
 }
 
+static int allocator_test_resync(void)
+{
+	/* Reserve the last block to exercise active_zone rollback as well. */
+	struct zns_zone zones[] = {
+		{ .start_sector = 0, .length = 32, .capacity = 16,
+		  .write_pointer = 8, .condition = BLK_ZONE_COND_CLOSED },
+		{ .start_sector = 32, .length = 32, .capacity = 16,
+		  .write_pointer = 32, .condition = BLK_ZONE_COND_EMPTY },
+	};
+	const struct {
+		sector_t wp;
+		u8 condition;
+		bool valid;
+		sector_t next;
+	} cases[] = {
+		{ 8, BLK_ZONE_COND_CLOSED, true, 8 },
+		{ 16, BLK_ZONE_COND_FULL, true, 32 },
+		{ 12, BLK_ZONE_COND_IMP_OPEN, false, 0 },
+		{ 0, BLK_ZONE_COND_EMPTY, false, 0 },
+		{ 24, BLK_ZONE_COND_CLOSED, false, 0 },
+		{ 8, BLK_ZONE_COND_READONLY, false, 0 },
+		{ 8, BLK_ZONE_COND_OFFLINE, false, 0 },
+		{ 8, BLK_ZONE_COND_FULL, false, 0 },
+	};
+	struct zns_allocator allocator;
+	struct zns_zone reported;
+	sector_t sector;
+	unsigned int i;
+	int ret;
+
+	for (i = 0; i < ARRAY_SIZE(cases); i++) {
+		ret = zns_allocator_init_zoned(&allocator, zones, 2,
+					       TEST_BLOCK_SECTORS);
+		if (ret)
+			return ret;
+		ret = zns_allocator_alloc(&allocator, &sector);
+		if (ret || sector != 8 || allocator.active_zone != 1)
+			goto fail;
+		reported = zones[0];
+		reported.write_pointer = cases[i].wp;
+		reported.condition = cases[i].condition;
+		ret = zns_allocator_resync(&allocator, sector, &reported);
+		if (cases[i].valid) {
+			if (ret)
+				goto fail;
+			ret = zns_allocator_alloc(&allocator, &sector);
+			if (ret || sector != cases[i].next)
+				goto fail;
+		} else if (!ret || allocator.zones[0].write_pointer != 16 ||
+			   allocator.zones[0].condition != BLK_ZONE_COND_CLOSED ||
+			   allocator.active_zone != 1) {
+			goto fail;
+		}
+		zns_allocator_exit(&allocator);
+	}
+	return 0;
+fail:
+	zns_allocator_exit(&allocator);
+	return -EINVAL;
+}
+
 static const struct zns_test_case allocator_cases[] = {
+	ZNS_TEST_CASE(allocator_test_resync,
+		      "when a write fails, only safe WP reports resume allocation at the correct block"),
 	ZNS_TEST_CASE(allocator_test_sequential,
 		      "when blocks are allocated in order, the allocator returns 0, 8, 16 and on"),
 	ZNS_TEST_CASE(allocator_test_enospc,
