@@ -19,6 +19,8 @@ Module.symvers
 .vscode/
 .idea/
 *.swp
+nvimlog
+.nvimlog
 .DS_Store
 
 # Local VM Settings

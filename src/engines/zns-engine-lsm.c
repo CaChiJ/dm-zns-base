@@ -528,12 +528,14 @@ static void zns_lsm_io_worker(struct work_struct *work)
 	sector_t physical_sector = 0;
 	int ret;
 
-	if ((bio_op(bio) == REQ_OP_READ || bio_op(bio) == REQ_OP_WRITE) &&
-	    !zns_lsm_is_aligned_io(lsm, bio->bi_iter.bi_sector,
-				  bio_sectors(bio))) {
-		ret = bio_op(bio) == REQ_OP_READ ? zns_lsm_read_partial(lsm, bio) :
-			zns_lsm_write_partial(lsm, bio);
-		goto complete;
+	if (!zns_lsm_is_aligned_io(lsm, bio->bi_iter.bi_sector, bio_sectors(bio))) {
+		if (bio_op(bio) == REQ_OP_READ) {
+			ret = zns_lsm_read_partial(lsm, bio);
+			goto complete;
+		} else if (bio_op(bio) == REQ_OP_WRITE) {
+			ret = zns_lsm_write_partial(lsm, bio);
+			goto complete;
+		}
 	}
 
 	clone = zns_lsm_clone_bio(lsm, bio);
