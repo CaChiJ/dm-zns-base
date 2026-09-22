@@ -20,6 +20,7 @@ static void zns_allocator_reset(struct zns_allocator *allocator)
 	allocator->zones = NULL;
 	allocator->nr_zones = 0;
 	allocator->active_zone = 0;
+	allocator->reserve_zone = UINT_MAX;
 	allocator->sectors_per_block = 0;
 	allocator->mode = ZNS_ALLOCATOR_LINEAR;
 }
@@ -105,12 +106,17 @@ void zns_allocator_exit(struct zns_allocator *allocator)
 static int zns_allocator_alloc_zoned(struct zns_allocator *allocator,
 				     sector_t *physical_sector)
 {
-	while (allocator->active_zone < allocator->nr_zones) {
+	unsigned int checked;
+
+	if (allocator->active_zone >= allocator->nr_zones)
+		allocator->active_zone = 0;
+	for (checked = 0; checked < allocator->nr_zones; checked++) {
 		struct zns_zone *zone =
 			&allocator->zones[allocator->active_zone];
 		sector_t zone_end = zone->start_sector + zone->capacity;
 
-		if (zns_zone_is_writable(zone) &&
+		if (allocator->active_zone != allocator->reserve_zone &&
+		    zns_zone_is_writable(zone) &&
 		    zone->write_pointer <= zone_end &&
 		    allocator->sectors_per_block <=
 			    zone_end - zone->write_pointer) {
@@ -122,10 +128,83 @@ static int zns_allocator_alloc_zoned(struct zns_allocator *allocator,
 			return 0;
 		}
 
-		allocator->active_zone++;
+		allocator->active_zone =
+			(allocator->active_zone + 1) % allocator->nr_zones;
 	}
 
 	return -ENOSPC;
+}
+
+int zns_allocator_set_reserve(struct zns_allocator *allocator,
+			      unsigned int zone)
+{
+	struct zns_zone *z;
+
+	if (!allocator || allocator->mode != ZNS_ALLOCATOR_ZONED ||
+	    zone >= allocator->nr_zones)
+		return -EINVAL;
+	z = &allocator->zones[zone];
+	if (!zns_zone_is_writable(z) ||
+	    z->capacity < allocator->sectors_per_block ||
+	    z->write_pointer != z->start_sector)
+		return -ENOSPC;
+	allocator->reserve_zone = zone;
+	return 0;
+}
+
+bool zns_allocator_has_space(struct zns_allocator *allocator)
+{
+	unsigned int i;
+	bool found = false;
+
+	spin_lock(&allocator->lock);
+	for (i = 0; i < allocator->nr_zones; i++) {
+		const struct zns_zone *z = &allocator->zones[i];
+		sector_t end = z->start_sector + z->capacity;
+
+		if (i != allocator->reserve_zone && zns_zone_is_writable(z) &&
+		    z->write_pointer <= end &&
+		    allocator->sectors_per_block <= end - z->write_pointer) {
+			found = true;
+			break;
+		}
+	}
+	spin_unlock(&allocator->lock);
+	return found;
+}
+
+int zns_allocator_alloc_gc(struct zns_allocator *allocator,
+			   sector_t *physical_sector)
+{
+	struct zns_zone *z;
+	sector_t end;
+
+	if (!allocator || !physical_sector ||
+	    allocator->reserve_zone >= allocator->nr_zones)
+		return -EINVAL;
+	z = &allocator->zones[allocator->reserve_zone];
+	end = z->start_sector + z->capacity;
+	if (!zns_zone_is_writable(z) || z->write_pointer > end ||
+	    allocator->sectors_per_block > end - z->write_pointer)
+		return -ENOSPC;
+	*physical_sector = z->write_pointer;
+	z->write_pointer += allocator->sectors_per_block;
+	return 0;
+}
+
+int zns_allocator_rotate_reserve(struct zns_allocator *allocator,
+				 unsigned int victim)
+{
+	struct zns_zone *z;
+
+	if (!allocator || victim >= allocator->nr_zones ||
+	    victim == allocator->reserve_zone)
+		return -EINVAL;
+	z = &allocator->zones[victim];
+	z->write_pointer = z->start_sector;
+	z->condition = BLK_ZONE_COND_EMPTY;
+	allocator->reserve_zone = victim;
+	return 0;
 }
 
 int zns_allocator_alloc(struct zns_allocator *allocator,

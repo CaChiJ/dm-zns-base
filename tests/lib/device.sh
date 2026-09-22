@@ -60,13 +60,41 @@ load_module() {
 create_dm_target() {
 	local sectors
 
-	sectors=$(blockdev --getsz "$UNDERLYING") ||
-		die "failed to read the sector count of $UNDERLYING"
+	sectors=$(usable_sectors) ||
+		die "failed to read the usable sector count of $UNDERLYING"
 	echo "0 $sectors zns-base $UNDERLYING" |
 		dmsetup create "$TARGET_NAME" ||
 		die "failed to create the DM target $TARGET_NAME"
 	[ -b "$DM_DEV" ] || die "$DM_DEV was not created"
 	ZNS_TARGET_CREATED=1
+}
+
+# Exclude the metadata zone and the largest data zone. The reserve can rotate
+# to any data zone, including one with a different capacity after restart.
+usable_sectors() {
+	local count line cap index=0 sum=0 largest=0
+
+	if [ "$ZNS_ENGINE" != lsm ]; then
+		blockdev --getsz "$UNDERLYING"
+		return
+	fi
+	count=$(underlying_attr nr_zones) || return 1
+	[ "$count" -ge 3 ] || return 1
+	while IFS= read -r line; do
+		if [[ $line =~ cap[[:space:]]+(0x[0-9a-fA-F]+) ]]; then
+			cap=${BASH_REMATCH[1]}
+			if [ "$index" -lt "$((count - 1))" ]; then
+				cap=$((cap / 8 * 8))
+				sum=$((sum + cap))
+				if [ "$cap" -gt "$largest" ]; then
+					largest=$cap
+				fi
+			fi
+			index=$((index + 1))
+		fi
+	done < <(blkzone report "$UNDERLYING")
+	[ "$index" -eq "$count" ] || return 1
+	printf '%s\n' "$((sum - largest))"
 }
 
 # Take this suite's target down and insist that it went. remove_dm_target

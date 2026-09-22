@@ -20,6 +20,7 @@ struct zns_base_c {
 static int zns_base_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 {
 	struct zns_base_c *c;
+	sector_t capacity;
 	int ret;
 
 	if (argc != 1) {
@@ -38,6 +39,13 @@ static int zns_base_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 		ti->error = "failed to open underlying device";
 		kfree(c);
 		return ret;
+	}
+	capacity = zns_engine_capacity(c->dev->bdev);
+	if (!capacity || ti->len > capacity) {
+		ti->error = "target exceeds usable logical capacity";
+		dm_put_device(ti, c->dev);
+		kfree(c);
+		return -EINVAL;
 	}
 
 	ret = zns_engine_init(&c->engine, c->dev->bdev, ti->len, ti->len, ZNS_BASE_BLOCK_SECTORS);

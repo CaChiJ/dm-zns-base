@@ -184,3 +184,8 @@ const char *zns_engine_name(void)
 {
 	return "append4k-alloc";
 }
+
+sector_t zns_engine_capacity(struct block_device *lower_bdev)
+{
+	return bdev_nr_sectors(lower_bdev);
+}

@@ -18,6 +18,7 @@ struct zns_allocator {
 	struct zns_zone *zones;
 	unsigned int nr_zones;
 	unsigned int active_zone;
+	unsigned int reserve_zone;
 	sector_t sectors_per_block;
 	enum zns_allocator_mode mode;
 	spinlock_t lock;
@@ -33,5 +34,12 @@ int zns_allocator_init_zoned(struct zns_allocator *allocator,
 void zns_allocator_exit(struct zns_allocator *allocator);
 int zns_allocator_alloc(struct zns_allocator *allocator,
 			sector_t *physical_sector);
+int zns_allocator_set_reserve(struct zns_allocator *allocator,
+			      unsigned int zone);
+bool zns_allocator_has_space(struct zns_allocator *allocator);
+int zns_allocator_alloc_gc(struct zns_allocator *allocator,
+			   sector_t *physical_sector);
+int zns_allocator_rotate_reserve(struct zns_allocator *allocator,
+				 unsigned int victim);
 
 #endif

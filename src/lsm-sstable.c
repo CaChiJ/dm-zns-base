@@ -365,7 +365,7 @@ int zns_sst_load(struct block_device *bdev, sector_t sector, sector_t limit,
 	if (ret)
 		goto free_block;
 
-	ret = zns_sst_decode_header(block, sst, NULL);
+	ret = zns_sst_decode_header(block, sst, &sst->payload_crc);
 	if (ret)
 		goto free_block;
 

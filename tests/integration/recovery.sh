@@ -218,7 +218,7 @@ case_length_mismatch_refused() {
 	local name="${TARGET_NAME}-short"
 	local sectors half
 
-	sectors=$(blockdev --getsz "$UNDERLYING") ||
+	sectors=$(usable_sectors) ||
 		fail "failed to read the sector count of $UNDERLYING"
 	half=$(( (sectors / 2 / BLOCK_SECTORS) * BLOCK_SECTORS ))
 
