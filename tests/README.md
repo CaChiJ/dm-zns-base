@@ -55,11 +55,16 @@ mapping persistence across a crash.
 ## M2 step 2: publish after successful writes
 
 Data mappings are now published only after the lower write succeeds. On a
-lower data write error the old mapping stays readable and `writes_stopped=1`
-appears in target status. Further data writes fail until normal target
-recreation reloads actual zone write pointers. Reads and metadata shutdown
-flushing remain available. This deliberately avoids guessing whether a failed
-write consumed its reserved sectors.
+lower data write error the old mapping stays readable. The ordered I/O worker
+temporarily stops writes and reports the failed zone's actual WP. If the zone
+geometry and condition are valid and its WP is unchanged or has advanced by
+exactly the failed block, the allocator resynchronizes and subsequent writes
+can proceed without target recreation (`writes_stopped=0`). The failed request
+still returns its original error and does not publish a mapping. Report errors,
+unexpected/partial WP movement, and read-only/offline zones retain
+`writes_stopped=1`; that fallback still requires target recreation. Reads and
+metadata shutdown flushing remain available. This does not recover metadata
+write errors, delayed flush errors, or a filesystem already handling an I/O error.
 
 If data succeeds but MemTable insertion fails, the write returns an error and
 the old mapping remains. The consumed physical block is not reclaimed, and
@@ -77,8 +82,9 @@ sudo env UNDERLYING=/dev/nullb0 ZNS_ENGINE=lsm TEST_THRESHOLD=1 \
 `write-failure` loads the module with `fail_data_write_at=2`, a read-only module
 parameter disabled by default. It simulates failure of the second allocated
 data write per target, before lower submission; metadata I/O is unaffected.
-It checks the old mapping, rejection of subsequent writes, and recovery and
-successful overwrite across clean target restarts. The second command repeats
+It checks the old mapping and unchanged lower WP after failure, a successful
+new write and overwrite without target recreation, and their readback after a
+clean target restart. The second command repeats
 the test with the old mapping in an SSTable instead of the active MemTable.
 Expected I/O errors are not counted as failures in this injection suite.
 

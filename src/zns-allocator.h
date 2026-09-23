@@ -41,5 +41,8 @@ int zns_allocator_alloc_gc(struct zns_allocator *allocator,
 			   sector_t *physical_sector);
 int zns_allocator_rotate_reserve(struct zns_allocator *allocator,
 				 unsigned int victim);
+/* Caller must serialize allocation and lower writes across report and resync. */
+int zns_allocator_resync(struct zns_allocator *allocator,
+			 sector_t failed_sector, const struct zns_zone *reported);
 
 #endif

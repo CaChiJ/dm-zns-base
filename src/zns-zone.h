@@ -24,6 +24,8 @@ struct zns_zone_table {
 
 int zns_zone_table_init(struct zns_zone_table *table,
 			struct block_device *bdev);
+int zns_zone_report_one(struct block_device *bdev, sector_t sector,
+			struct zns_zone *zone);
 void zns_zone_table_destroy(struct zns_zone_table *table);
 
 #endif /* DM_ZNS_BASE_ZONE_H */

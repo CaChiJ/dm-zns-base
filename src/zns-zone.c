@@ -4,6 +4,7 @@
 #include <linux/errno.h>
 #include <linux/version.h>
 #include <linux/slab.h>
+#include <linux/string.h>
 
 #include "zns-zone.h"
 
@@ -46,6 +47,32 @@ static int zns_zone_report_cb(struct blk_zone *reported,
 	zone->active = zns_zone_is_active(reported->cond);
 
 	return 0;
+}
+
+static int zns_zone_report_one_cb(struct blk_zone *reported,
+				unsigned int index, void *data)
+{
+	struct zns_zone *zone = data;
+
+	if (index || reported->type != BLK_ZONE_TYPE_SEQWRITE_REQ)
+		return -EINVAL;
+	zone->start_sector = reported->start;
+	zone->length = reported->len;
+	zone->capacity = reported->capacity;
+	zone->write_pointer = reported->wp;
+	zone->condition = reported->cond;
+	zone->active = zns_zone_is_active(reported->cond);
+	return 0;
+}
+
+int zns_zone_report_one(struct block_device *bdev, sector_t sector,
+			struct zns_zone *zone)
+{
+	int ret;
+
+	memset(zone, 0, sizeof(*zone));
+	ret = blkdev_report_zones(bdev, sector, 1, zns_zone_report_one_cb, zone);
+	return ret < 0 ? ret : (ret == 1 ? 0 : -EIO);
 }
 
 int zns_zone_table_init(struct zns_zone_table *table,

@@ -64,44 +64,42 @@ case_failed_overwrite() {
 	assert_block "$tmp_dir/a" 0
 	wp_before=$(zone_write_pointer 0)
 	expect_write_failure 0
-	assert_eq "$(status_field writes_stopped)" 1 "data writes did not stop"
+	assert_eq "$(status_field writes_stopped)" 0 "WP resync did not enable writes"
 	assert_eq "$(zone_write_pointer 0)" "$wp_before" \
 		"injected pre-submission failure advanced the lower WP"
 	assert_block "$tmp_dir/a" 0
 }
 
-case_stopped_writes() {
-	local wp_before
+case_next_write() {
+	local wp_before wp_after
 	wp_before=$(zone_write_pointer 0)
-	expect_write_failure 1
-	assert_eq "$(zone_write_pointer 0)" "$wp_before" "lower WP changed"
 	assert_block "$tmp_dir/zero" 1
+	write_block "$tmp_dir/b" 1
+	wp_after=$(zone_write_pointer 0)
+	assert_eq "$((wp_after))" "$((wp_before + 8))" \
+		"resumed write did not consume exactly one block"
+	assert_block "$tmp_dir/b" 1
 	assert_block "$tmp_dir/a" 0
 }
 
 run_case "when an overwrite fails before submission, the old mapping remains readable" \
 	case_failed_overwrite
-run_case "when writes are stopped, new writes fail without advancing the lower WP" \
-	case_stopped_writes
-
-# Lifecycle changes stay outside run_case's subshell, so cleanup owns the
-# correct target even if recreation fails. Never reset zones between restarts.
-recreate_dm_target
-run_case "when the target restarts after a failed overwrite, the old data survives" \
-	assert_block "$tmp_dir/a" 0
-run_case "when the target restarts, data writes are enabled again" \
-	assert_eq "$(status_field writes_stopped)" 0
+run_case "after WP resync, a new write succeeds without target recreation" \
+	case_next_write
 
 case_resumed_write() {
 	dd if="$tmp_dir/b" of="$DM_DEV" bs="$WRITE_BYTES" seek="$WRITE_OFFSET" \
 		count=1 oflag=direct,seek_bytes conv=notrunc status=none
 	assert_block "$tmp_dir/expected" 0
 }
-run_case "when writing resumes from the reported WP, an overwrite succeeds" \
+run_case "after WP resync, an overwrite succeeds without target recreation" \
 	case_resumed_write
+# Never reset zones between writes and this clean restart.
 recreate_dm_target
-run_case "when the target restarts again, the successful overwrite survives" \
+run_case "when the target restarts, the successful overwrite survives" \
 	assert_block "$tmp_dir/expected" 0
+run_case "when the target restarts, the resumed new write survives" \
+	assert_block "$tmp_dir/b" 1
 
 # I/O errors are intentional in this suite; the normal regression suites
 # continue to enforce that their workloads emit no new I/O errors.
