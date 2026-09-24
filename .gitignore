@@ -19,6 +19,8 @@ Module.symvers
 .vscode/
 .idea/
 *.swp
+nvimlog
+.nvimlog
 .DS_Store
 
 # Local VM Settings
@@ -27,3 +29,4 @@ Module.symvers
 
 # Local Codex instructions and connection details
 /AGENTS.md
+/.local-skills/devlog/
