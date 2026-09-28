@@ -8,7 +8,7 @@ endif
 obj-m += dm-zns-base.o
 dm-zns-base-y := dm-zns-base-main.o zns-allocator.o zns-zone.o lsm-memtable.o lsm-sstable.o lsm-super.o engines/zns-engine-$(ZNS_ENGINE).o
 ifeq ($(ZNS_ENGINE),lsm)
-dm-zns-base-y += gc/zns-gc-$(ZNS_GC_POLICY).o
+dm-zns-base-y += gc-policy/zns-gc-$(ZNS_GC_POLICY).o
 endif
 ccflags-y += -I$(src)
 

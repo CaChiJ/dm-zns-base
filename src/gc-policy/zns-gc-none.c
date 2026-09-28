@@ -2,12 +2,12 @@
 #include <linux/errno.h>
 #include "zns-gc.h"
 
-static bool should_gc(struct zns_gc_context *ctx)
+static bool should_gc(const struct zns_gc_context *ctx)
 {
 	return false;
 }
 
-static int run_gc(struct zns_gc_context *ctx)
+static int select_victim(const struct zns_gc_context *ctx)
 {
 	return -ENOSPC;
 }
@@ -15,5 +15,5 @@ static int run_gc(struct zns_gc_context *ctx)
 const struct zns_gc_policy zns_gc_policy = {
 	.name = "none",
 	.should_gc = should_gc,
-	.run_gc = run_gc,
+	.select_victim = select_victim,
 };
