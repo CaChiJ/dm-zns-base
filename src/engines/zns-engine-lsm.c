@@ -229,9 +229,9 @@ static int zns_lsm_gc_rebuild(struct zns_lsm *lsm)
 			struct zns_sst_disk_entry *entries = block;
 			unsigned int count, j;
 
-			ret = zns_meta_block_rw(lsm->lower_bdev,
+			ret = zns_block_read(lsm->lower_bdev,
 				sst->start_sector + (page + 1) * ZNS_SST_BLOCK_SECTORS,
-				REQ_OP_READ, block);
+				block);
 			if (ret)
 				goto out;
 			crc = crc32_le(crc, block, ZNS_SST_BLOCK_BYTES);
@@ -556,8 +556,7 @@ static int zns_lsm_read_partial(struct zns_lsm *lsm, struct bio *bio)
 			break;
 		} else {
 			/* The shared helper submits any aligned 4 KiB block. */
-			ret = zns_meta_block_rw(lsm->lower_bdev, physical_sector,
-						REQ_OP_READ, buffer);
+			ret = zns_block_read(lsm->lower_bdev, physical_sector, buffer);
 			if (ret)
 				break;
 		}
@@ -653,15 +652,13 @@ static int zns_lsm_gc_clean(struct zns_gc_context *ctx, unsigned int id)
 			continue;
 		logical = gz->logical[slot] - 1;
 		source = victim->start_sector + slot * lsm->sectors_per_block;
-		ret = zns_meta_block_rw(lsm->lower_bdev, source,
-					REQ_OP_READ, block);
+		ret = zns_block_read(lsm->lower_bdev, source, block);
 		if (ret)
 			break;
 		ret = zns_allocator_alloc_gc(allocator, &dest);
 		if (ret)
 			break;
-		ret = zns_meta_block_rw(lsm->lower_bdev, dest,
-					REQ_OP_WRITE, block);
+		ret = zns_block_write(lsm->lower_bdev, dest, block, REQ_OP_WRITE);
 		if (ret)
 			break;
 		ret = zns_lsm_publish_write(lsm,
@@ -738,7 +735,7 @@ static int zns_lsm_append_write(struct zns_lsm *lsm, sector_t logical_sector,
 		clone->bi_iter.bi_sector = physical_sector;
 		ret = submit_bio_wait(clone);
 	} else {
-		ret = zns_meta_block_rw(lsm->lower_bdev, physical_sector, opf, buffer);
+		ret = zns_block_write(lsm->lower_bdev, physical_sector, buffer, opf);
 	}
 	if (ret) {
 		struct zns_zone reported;
@@ -798,8 +795,7 @@ static int zns_lsm_write_partial(struct zns_lsm *lsm, struct bio *bio)
 			} else if (ret) {
 				break;
 			} else {
-				ret = zns_meta_block_rw(lsm->lower_bdev, physical_sector,
-							REQ_OP_READ, buffer);
+				ret = zns_block_read(lsm->lower_bdev, physical_sector, buffer);
 				if (ret)
 					break;
 			}

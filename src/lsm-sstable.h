@@ -56,13 +56,13 @@ struct zns_sstable {
 };
 
 /*
- * Submit one 4 KiB metadata block and wait for it. The buffer must come from
- * kmalloc() so that it is permanently mapped; no kmap is needed around the
- * sleeping submission. Shared with the superblock, which lives in the same
- * reserved zone.
+ * Submit one 4 KiB block and wait for it. The buffer must come from kmalloc()
+ * so that it is permanently mapped; no kmap is needed around the sleeping
+ * submission.
  */
-int zns_meta_block_rw(struct block_device *bdev, sector_t sector,
-		      unsigned int opf, void *buffer);
+int zns_block_read(struct block_device *bdev, sector_t sector, void *block);
+int zns_block_write(struct block_device *bdev, sector_t sector,
+		    const void *block, unsigned int opf);
 
 /* Total blocks, header included, needed to hold nr_entries mappings. */
 unsigned int zns_sst_nr_blocks(u32 nr_entries);
