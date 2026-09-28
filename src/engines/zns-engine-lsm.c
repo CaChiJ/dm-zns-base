@@ -217,44 +217,65 @@ static int zns_lsm_gc_map_init(struct zns_lsm *lsm)
 }
 
 /*
- * Validate both locations before changing GC state. publish_write() has
- * reserved the XArray entry, so replacing it needs no further allocation.
+ * Record that logical_block now lives at physical_sector: the new copy becomes
+ * valid and the previous copy, if any, becomes garbage for GC. All checks run
+ * before any change, so a failure leaves both GC indexes untouched.
+ * publish_write() has reserved the XArray entry, so the store allocates nothing.
  */
 static int zns_lsm_update_gc_block_location(struct zns_lsm *lsm, sector_t logical_block, sector_t physical_sector)
 {
-	unsigned int new_zone;
+	sector_t logical_entry = zns_gc_logical_entry(logical_block);
+
+	/* The new location must be a written data block that no block owns yet. */
+	unsigned int new_zone_id;
 	sector_t new_slot;
-	int ret = zns_lsm_gc_slot(lsm, physical_sector, &new_zone, &new_slot);
+	int ret = zns_lsm_gc_slot(lsm, physical_sector, &new_zone_id, &new_slot);
 
 	if (ret) {
 		return ret;
 	}
-	if (lsm->gc_zones[new_zone].logical_blocks[new_slot]) {
+
+	struct zns_gc_zone *new_zone = &lsm->gc_zones[new_zone_id];
+
+	if (new_zone->logical_blocks[new_slot]) {
 		return -EINVAL;
 	}
 
-	void *old = xa_load(&lsm->latest, logical_block);
-	unsigned int old_zone = 0;
+	/* On overwrite, the previous location must still record this block. */
+	void *old_entry = xa_load(&lsm->latest, logical_block);
+	bool is_overwrite = old_entry != NULL;
+	struct zns_gc_zone *old_zone = NULL;
 	sector_t old_slot = 0;
 
-	if (old) {
-		ret = zns_lsm_gc_slot(lsm, zns_gc_physical_sector(old), &old_zone, &old_slot);
-		if (ret || lsm->gc_zones[old_zone].logical_blocks[old_slot] != zns_gc_logical_entry(logical_block)) {
+	if (is_overwrite) {
+		unsigned int old_zone_id;
+
+		ret = zns_lsm_gc_slot(lsm, zns_gc_physical_sector(old_entry),
+				      &old_zone_id, &old_slot);
+		if (ret) {
+			return -EINVAL;
+		}
+		old_zone = &lsm->gc_zones[old_zone_id];
+		if (old_zone->logical_blocks[old_slot] != logical_entry) {
 			return -EINVAL;
 		}
 	}
-	ret = xa_err(xa_store(&lsm->latest, logical_block, zns_gc_physical_entry(physical_sector), GFP_NOIO));
+
+	/* Commit: point latest at the new copy, then move validity from old to new. */
+	ret = xa_err(xa_store(&lsm->latest, logical_block,
+			      zns_gc_physical_entry(physical_sector), GFP_NOIO));
 	if (ret) {
 		return ret;
 	}
-	if (old) {
-		lsm->gc_zones[old_zone].logical_blocks[old_slot] = 0;
-		lsm->gc_zones[old_zone].nr_valid_blocks--;
+	if (is_overwrite) {
+		old_zone->logical_blocks[old_slot] = 0;
+		old_zone->nr_valid_blocks--;
 	} else {
+		/* Only the first copy of a logical block adds to the total. */
 		atomic64_inc(&lsm->valid_blocks);
 	}
-	lsm->gc_zones[new_zone].logical_blocks[new_slot] = zns_gc_logical_entry(logical_block);
-	lsm->gc_zones[new_zone].nr_valid_blocks++;
+	new_zone->logical_blocks[new_slot] = logical_entry;
+	new_zone->nr_valid_blocks++;
 	return 0;
 }
 
