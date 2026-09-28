@@ -61,25 +61,25 @@ module_param_named(fail_gc_zone_reset_at, zns_lsm_fail_gc_zone_reset_at, uint, 0
 MODULE_PARM_DESC(fail_gc_zone_reset_at, "Fail the Nth GC zone reset per target before submission (0=off)");
 
 /* Zero denotes an unused reverse-map slot; logical block zero is valid. */
-static sector_t zns_gc_logical_entry(sector_t logical_block)
+static sector_t zns_gc_encode_logical_block(sector_t logical_block)
 {
 	return logical_block + 1;
 }
 
 /* Decode only occupied reverse-map slots. */
-static sector_t zns_gc_logical_block(sector_t entry)
+static sector_t zns_gc_decode_logical_block(sector_t entry)
 {
 	return entry - 1;
 }
 
 /* Preserve the sector + 1 representation inside XArray tagged values. */
-static void *zns_gc_physical_entry(sector_t physical_sector)
+static void *zns_gc_encode_physical_sector(sector_t physical_sector)
 {
 	return xa_mk_value(physical_sector + 1);
 }
 
 /* Decode only non-NULL entries returned by xa_load(). */
-static sector_t zns_gc_physical_sector(void *entry)
+static sector_t zns_gc_decode_physical_sector(void *entry)
 {
 	return xa_to_value(entry) - 1;
 }
@@ -163,24 +163,28 @@ sector_t zns_engine_capacity(struct block_device *lower_bdev)
 	return data_sectors - largest_data_zone_sectors;
 }
 
-static int zns_lsm_gc_slot(struct zns_lsm *lsm, sector_t physical,
-			   unsigned int *zone_id, sector_t *slot)
+/*
+ * Convert a physical sector to its reverse-map position (zone id, block slot).
+ * Fails unless the sector starts a whole, already written data block.
+ */
+static int zns_lsm_physical_to_gc_slot(struct zns_lsm *lsm, sector_t physical_sector,
+				       unsigned int *zone_id, sector_t *slot)
 {
 	for (unsigned int i = 0; i < lsm->allocator.nr_zones; i++) {
 		const struct zns_zone *z = &lsm->allocator.zones[i];
 
-		if (physical < z->start_sector ||
-		    physical >= z->start_sector + z->capacity) {
+		if (physical_sector < z->start_sector ||
+		    physical_sector >= z->start_sector + z->capacity) {
 			continue;
 		}
-		if ((physical - z->start_sector) % lsm->sectors_per_block ||
-		    lsm->sectors_per_block > z->start_sector + z->capacity - physical ||
-		    (physical >= z->write_pointer &&
+		if ((physical_sector - z->start_sector) % lsm->sectors_per_block ||
+		    lsm->sectors_per_block > z->start_sector + z->capacity - physical_sector ||
+		    (physical_sector >= z->write_pointer &&
 		     z->condition != BLK_ZONE_COND_FULL)) {
 			return -EINVAL;
 		}
 		*zone_id = i;
-		*slot = (physical - z->start_sector) / lsm->sectors_per_block;
+		*slot = (physical_sector - z->start_sector) / lsm->sectors_per_block;
 		return 0;
 	}
 	return -EINVAL;
@@ -224,12 +228,12 @@ static int zns_lsm_gc_map_init(struct zns_lsm *lsm)
  */
 static int zns_lsm_update_gc_block_location(struct zns_lsm *lsm, sector_t logical_block, sector_t physical_sector)
 {
-	sector_t logical_entry = zns_gc_logical_entry(logical_block);
+	sector_t logical_entry = zns_gc_encode_logical_block(logical_block);
 
 	/* The new location must be a written data block that no block owns yet. */
 	unsigned int new_zone_id;
 	sector_t new_slot;
-	int ret = zns_lsm_gc_slot(lsm, physical_sector, &new_zone_id, &new_slot);
+	int ret = zns_lsm_physical_to_gc_slot(lsm, physical_sector, &new_zone_id, &new_slot);
 
 	if (ret) {
 		return ret;
@@ -250,8 +254,8 @@ static int zns_lsm_update_gc_block_location(struct zns_lsm *lsm, sector_t logica
 	if (is_overwrite) {
 		unsigned int old_zone_id;
 
-		ret = zns_lsm_gc_slot(lsm, zns_gc_physical_sector(old_entry),
-				      &old_zone_id, &old_slot);
+		ret = zns_lsm_physical_to_gc_slot(lsm, zns_gc_decode_physical_sector(old_entry),
+						  &old_zone_id, &old_slot);
 		if (ret) {
 			return -EINVAL;
 		}
@@ -263,7 +267,7 @@ static int zns_lsm_update_gc_block_location(struct zns_lsm *lsm, sector_t logica
 
 	/* Commit: point latest at the new copy, then move validity from old to new. */
 	ret = xa_err(xa_store(&lsm->latest, logical_block,
-			      zns_gc_physical_entry(physical_sector), GFP_NOIO));
+			      zns_gc_encode_physical_sector(physical_sector), GFP_NOIO));
 	if (ret) {
 		return ret;
 	}
@@ -295,18 +299,18 @@ static int zns_lsm_gc_restore_entry(struct zns_lsm *lsm, const struct zns_sst_di
 
 	unsigned int zone;
 	sector_t slot;
-	int ret = zns_lsm_gc_slot(lsm, physical_sector, &zone, &slot);
+	int ret = zns_lsm_physical_to_gc_slot(lsm, physical_sector, &zone, &slot);
 
 	if (ret || lsm->gc_zones[zone].logical_blocks[slot]) {
 		return -EINVAL;
 	}
 	ret = xa_err(xa_store(&lsm->latest, logical_block,
-			     zns_gc_physical_entry(physical_sector),
+			     zns_gc_encode_physical_sector(physical_sector),
 			     GFP_KERNEL));
 	if (ret) {
 		return ret;
 	}
-	lsm->gc_zones[zone].logical_blocks[slot] = zns_gc_logical_entry(logical_block);
+	lsm->gc_zones[zone].logical_blocks[slot] = zns_gc_encode_logical_block(logical_block);
 	lsm->gc_zones[zone].nr_valid_blocks++;
 	atomic64_inc(&lsm->valid_blocks);
 	return 0;
@@ -805,7 +809,7 @@ static int zns_lsm_gc_clean(struct zns_lsm *lsm, unsigned int id)
 			continue;
 		}
 
-		sector_t logical_block = zns_gc_logical_block(victim_zone->logical_blocks[slot]);
+		sector_t logical_block = zns_gc_decode_logical_block(victim_zone->logical_blocks[slot]);
 		sector_t source_sector = device_zone->start_sector + slot * lsm->sectors_per_block;
 
 		ret = zns_lsm_gc_relocate_block(lsm, logical_block, source_sector, buffer);
