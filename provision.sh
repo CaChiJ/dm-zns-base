@@ -15,13 +15,13 @@ apt-get install -y \
 	dmsetup \
 	util-linux \
 	nvme-cli \
-	fio
+	fio \
+	jq
 
 cat <<'EOF'
 
 [provision] Done. Next, inside the guest:
   cd /vagrant
   sudo bash scripts/nullblk-up.sh
-  cd src && make && cd ..
-  sudo bash scripts/test-basic.sh
+  sudo ./test.sh
 EOF
