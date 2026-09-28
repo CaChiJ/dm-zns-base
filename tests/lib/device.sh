@@ -19,7 +19,10 @@ ZNS_TARGET_CREATED=0
 ZNS_IO_ERROR_PATTERN='blk_update_request|I/O error|zone.*(reject|invalid)|write.*(reject|prohibited)'
 
 remove_dm_target() {
-	dmsetup remove "$TARGET_NAME" 2>/dev/null || true
+	# Closing a device after writes makes udev probe it; a remove during that
+	# probe fails with EBUSY and leaves the module pinned for later suites.
+	udevadm settle 2>/dev/null || true
+	dmsetup remove --retry "$TARGET_NAME" 2>/dev/null || true
 }
 
 unload_module() {
