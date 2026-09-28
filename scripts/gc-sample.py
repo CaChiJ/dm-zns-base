@@ -24,16 +24,15 @@ def sample(underlying, target, stat_path, initial_sectors):
     status = subprocess.check_output(["dmsetup", "status", target], text=True)
     zones = []
     for line in report.splitlines():
-        fields = dict((key, int(value, 16)) for key, value in
-                      re.findall(r"\b(start|cap|wptr):?\s+(0x[0-9a-fA-F]+)", line))
+        matches = re.findall(r"\b(start|cap|wptr):?\s+(0x[0-9a-fA-F]+)", line)
+        fields = {key: int(value, 16) for key, value in matches}
         if len(fields) != 3:
             raise ValueError(f"unrecognized blkzone line: {line}")
         zones.append(fields)
     if len(zones) < 3:
         raise ValueError("at least three zones are required")
     # util-linux blkzone prints wptr relative to each zone's start.
-    written_blocks = sum(min(z["wptr"], z["cap"]) // 8
-                         for z in zones[:-1])
+    written_blocks = sum(min(z["wptr"], z["cap"]) // 8 for z in zones[:-1])
     values = dict(re.findall(r"\b([a-z_]+)=([^\s]+)", status))
     valid = int(values["valid_blocks"])
     return (timestamp_ns, max(sectors_written, 0) * 512, valid,
@@ -53,8 +52,9 @@ def main():
     parser.add_argument("--initial-sectors", type=int)
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args()
-    initial = (args.initial_sectors if args.initial_sectors is not None else
-               int(args.stat.read_text().split()[6]))
+    initial = args.initial_sectors
+    if initial is None:
+        initial = int(args.stat.read_text().split()[6])
     signal.signal(signal.SIGTERM, stop_sampling)
     signal.signal(signal.SIGINT, stop_sampling)
     with args.output.open("w", newline="") as handle:

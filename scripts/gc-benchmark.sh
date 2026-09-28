@@ -65,8 +65,7 @@ run_mode() {
 			--output "$dir/samples.csv" --interval "$interval" &
 		sampler=$!
 	fi
-	fio_run "$dir/overwrite.json" randwrite \
-		--io_size="$overwrite_bytes" || result=$?
+	fio_run "$dir/overwrite.json" randwrite --io_size="$overwrite_bytes" || result=$?
 	if [ -n "$sampler" ]; then
 		kill "$sampler" 2>/dev/null || true
 		wait "$sampler" || true

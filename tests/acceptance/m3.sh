@@ -77,8 +77,8 @@ case_simple() {
 		--norandommap=1 --randrepeat=1 --randseed=314159 ||
 		fail "simple overwrite or latest-data verification failed"
 	check_fio_success "$tmp_dir/simple-overwrite.json" "$overwrite_bytes"
-	fio_job simple-readback "$tmp_dir/simple-readback.json" \
-		--rw=read --verify_only=1 || fail "simple readback failed"
+	fio_job simple-readback "$tmp_dir/simple-readback.json" --rw=read --verify_only=1 ||
+		fail "simple readback failed"
 	check_fio_read_success "$tmp_dir/simple-readback.json"
 	[ "$(status_field gc_moved)" -gt 0 ] || fail "GC moved no valid data"
 	[ "$(status_field zone_resets)" -gt 0 ] || fail "GC reset no data zone"
