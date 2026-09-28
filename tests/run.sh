@@ -99,7 +99,7 @@ print_summary() {
 }
 
 selected=()
-case "${1:---help}" in
+case "${1:-}" in
 --list|-l)
 	list_suites | while read -r path; do suite_label "$path"; done
 	exit 0
