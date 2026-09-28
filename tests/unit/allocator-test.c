@@ -481,35 +481,45 @@ static int allocator_test_reserve_rotation(void)
 	int ret;
 
 	ret = zns_allocator_init_zoned(&allocator, zones, ARRAY_SIZE(zones), 8);
-	if (ret)
+	if (ret) {
 		return ret;
+	}
 	ret = zns_allocator_set_reserve(&allocator, 2);
-	if (ret)
+	if (ret) {
 		goto out;
+	}
 	ret = zns_allocator_alloc(&allocator, &sector);
-	if (ret || sector != 0)
+	if (ret || sector != 0) {
 		goto bad;
+	}
 	ret = zns_allocator_alloc(&allocator, &sector);
-	if (ret || sector != 8)
+	if (ret || sector != 8) {
 		goto bad;
+	}
 	ret = zns_allocator_alloc(&allocator, &sector);
-	if (ret || sector != 16)
+	if (ret || sector != 16) {
 		goto bad;
+	}
 	ret = zns_allocator_alloc(&allocator, &sector);
-	if (ret || sector != 24)
+	if (ret || sector != 24) {
 		goto bad;
+	}
 	if (zns_allocator_has_space(&allocator) ||
-	    zns_allocator_alloc(&allocator, &sector) != -ENOSPC)
+	    zns_allocator_alloc(&allocator, &sector) != -ENOSPC) {
 		goto bad;
+	}
 	ret = zns_allocator_alloc_gc(&allocator, &sector);
-	if (ret || sector != 32)
+	if (ret || sector != 32) {
 		goto bad;
-	ret = zns_allocator_rotate_reserve(&allocator, 0);
-	if (ret)
+	}
+	ret = zns_allocator_set_reserve_after_reset(&allocator, 0);
+	if (ret) {
 		goto out;
+	}
 	ret = zns_allocator_alloc(&allocator, &sector);
-	if (ret || sector != 40 || allocator.reserve_zone != 0)
+	if (ret || sector != 40 || allocator.reserve_zone != 0) {
 		goto bad;
+	}
 	ret = 0;
 	goto out;
 bad:
@@ -552,21 +562,25 @@ static int allocator_test_resync(void)
 	for (i = 0; i < ARRAY_SIZE(cases); i++) {
 		ret = zns_allocator_init_zoned(&allocator, zones, 2,
 					       TEST_BLOCK_SECTORS);
-		if (ret)
+		if (ret) {
 			return ret;
+		}
 		ret = zns_allocator_alloc(&allocator, &sector);
-		if (ret || sector != 8 || allocator.active_zone != 1)
+		if (ret || sector != 8 || allocator.active_zone != 1) {
 			goto fail;
+		}
 		reported = zones[0];
 		reported.write_pointer = cases[i].wp;
 		reported.condition = cases[i].condition;
 		ret = zns_allocator_resync(&allocator, sector, &reported);
 		if (cases[i].valid) {
-			if (ret)
+			if (ret) {
 				goto fail;
+			}
 			ret = zns_allocator_alloc(&allocator, &sector);
-			if (ret || sector != cases[i].next)
+			if (ret || sector != cases[i].next) {
 				goto fail;
+			}
 		} else if (!ret || allocator.zones[0].write_pointer != 16 ||
 			   allocator.zones[0].condition != BLK_ZONE_COND_CLOSED ||
 			   allocator.active_zone != 1) {

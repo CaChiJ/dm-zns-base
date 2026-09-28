@@ -3,6 +3,7 @@
 #define DM_ZNS_BASE_ZONE_H
 
 #include <linux/blk_types.h>
+#include <linux/blkzoned.h>
 #include <linux/types.h>
 
 struct block_device;
@@ -21,6 +22,18 @@ struct zns_zone_table {
 	struct zns_zone *zones;
 	unsigned int nr_zones;
 };
+
+/* Validated zone geometry; reserve selection is the caller's responsibility. */
+static inline bool zns_zone_can_append(const struct zns_zone *zone, sector_t sectors_per_block)
+{
+	sector_t end = zone->start_sector + zone->capacity;
+
+	return zone->condition != BLK_ZONE_COND_FULL &&
+	       zone->condition != BLK_ZONE_COND_READONLY &&
+	       zone->condition != BLK_ZONE_COND_OFFLINE &&
+	       zone->write_pointer <= end &&
+	       sectors_per_block <= end - zone->write_pointer;
+}
 
 int zns_zone_table_init(struct zns_zone_table *table,
 			struct block_device *bdev);

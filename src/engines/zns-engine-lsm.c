@@ -675,7 +675,7 @@ static int zns_lsm_gc_clean(struct zns_gc_context *ctx, unsigned int id)
 				victim->start_sector, victim->length, GFP_NOIO);
 			if (!ret) {
 				atomic64_inc(&lsm->gc_resets);
-				ret = zns_allocator_rotate_reserve(allocator, id);
+				ret = zns_allocator_set_reserve_after_reset(allocator, id);
 			}
 		}
 	}

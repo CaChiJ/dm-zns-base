@@ -34,13 +34,22 @@ int zns_allocator_init_zoned(struct zns_allocator *allocator,
 void zns_allocator_exit(struct zns_allocator *allocator);
 int zns_allocator_alloc(struct zns_allocator *allocator,
 			sector_t *physical_sector);
-int zns_allocator_set_reserve(struct zns_allocator *allocator,
-			      unsigned int zone);
+/* Initialization only: select an empty data zone before starting I/O. */
+int zns_allocator_set_reserve(struct zns_allocator *allocator, unsigned int zone);
+/* Checks ordinary space, excluding the reserve; takes the allocator lock. */
 bool zns_allocator_has_space(struct zns_allocator *allocator);
-int zns_allocator_alloc_gc(struct zns_allocator *allocator,
-			   sector_t *physical_sector);
-int zns_allocator_rotate_reserve(struct zns_allocator *allocator,
-				 unsigned int victim);
+/*
+ * GC-only operations below do not take the allocator lock. The caller must
+ * serialize them with allocation and lower data I/O (the LSM ordered worker).
+ * alloc_gc reserves one block in memory; it does not submit a device write.
+ */
+int zns_allocator_alloc_gc(struct zns_allocator *allocator, sector_t *physical_sector);
+/*
+ * Call only after all live blocks have moved and the device reset succeeded.
+ * Updates memory only: the reset victim becomes the reserve, and the previous
+ * reserve becomes ordinary space. This function never issues a device reset.
+ */
+int zns_allocator_set_reserve_after_reset(struct zns_allocator *allocator, unsigned int victim);
 /* Caller must serialize allocation and lower writes across report and resync. */
 int zns_allocator_resync(struct zns_allocator *allocator,
 			 sector_t failed_sector, const struct zns_zone *reported);
