@@ -51,6 +51,14 @@ static unsigned int zns_lsm_fail_data_write_at;
 module_param_named(fail_data_write_at, zns_lsm_fail_data_write_at, uint, 0444);
 MODULE_PARM_DESC(fail_data_write_at, "Fail the Nth allocated data write per target before submission (0=off)");
 
+/* Test-only: exercise GC failure handling without relying on device faults. */
+static unsigned int zns_lsm_fail_gc_move_write_at;
+module_param_named(fail_gc_move_write_at, zns_lsm_fail_gc_move_write_at, uint, 0444);
+MODULE_PARM_DESC(fail_gc_move_write_at, "Fail the Nth GC destination write per target before submission (0=off)");
+
+static unsigned int zns_lsm_fail_gc_zone_reset_at;
+module_param_named(fail_gc_zone_reset_at, zns_lsm_fail_gc_zone_reset_at, uint, 0444);
+MODULE_PARM_DESC(fail_gc_zone_reset_at, "Fail the Nth GC zone reset per target before submission (0=off)");
 
 /* Zero denotes an unused reverse-map slot; logical block zero is valid. */
 static sector_t zns_gc_logical_entry(sector_t logical_block)
@@ -109,6 +117,8 @@ struct zns_lsm {
 	sector_t sectors_per_block;
 	/* Only the ordered I/O worker changes these fields. */
 	u64 data_write_attempts;
+	u64 gc_move_write_attempts;
+	u64 gc_zone_reset_attempts;
 	bool writes_stopped;
 
 	/* Reserved metadata zone and its SSTables, all guarded by sst_lock. */
@@ -728,7 +738,14 @@ static int zns_lsm_gc_relocate_block(struct zns_lsm *lsm, sector_t logical_block
 	if (ret) {
 		return ret;
 	}
-	ret = zns_block_write(lsm->lower_bdev, destination_sector, buffer, REQ_OP_WRITE);
+	lsm->gc_move_write_attempts++;
+	if (zns_lsm_fail_gc_move_write_at && lsm->gc_move_write_attempts == zns_lsm_fail_gc_move_write_at) {
+		DMWARN("injecting GC destination write failure before submission at sector %llu",
+		       (unsigned long long)destination_sector);
+		ret = -EIO;
+	} else {
+		ret = zns_block_write(lsm->lower_bdev, destination_sector, buffer, REQ_OP_WRITE);
+	}
 	if (ret) {
 		return ret;
 	}
@@ -781,8 +798,14 @@ static int zns_lsm_gc_clean(struct zns_lsm *lsm, unsigned int id)
 		ret = -EINVAL;
 		goto stop_writes;
 	}
-	ret = blkdev_zone_mgmt(lsm->lower_bdev, REQ_OP_ZONE_RESET,
-			      device_zone->start_sector, device_zone->length, GFP_NOIO);
+	lsm->gc_zone_reset_attempts++;
+	if (zns_lsm_fail_gc_zone_reset_at && lsm->gc_zone_reset_attempts == zns_lsm_fail_gc_zone_reset_at) {
+		DMWARN("injecting GC zone reset failure before submission for zone %u", id);
+		ret = -EIO;
+	} else {
+		ret = blkdev_zone_mgmt(lsm->lower_bdev, REQ_OP_ZONE_RESET,
+				      device_zone->start_sector, device_zone->length, GFP_NOIO);
+	}
 	if (ret) {
 		goto stop_writes;
 	}
