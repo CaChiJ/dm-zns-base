@@ -29,5 +29,6 @@ void zns_engine_status(struct zns_engine *engine, char *result,
 
 /* 현재 빌드에 링크된 engine 이름을 정적 문자열로 반환한다. */
 const char *zns_engine_name(void);
+sector_t zns_engine_capacity(struct block_device *lower_bdev);
 
 #endif

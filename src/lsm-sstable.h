@@ -16,9 +16,8 @@ struct lsm_memtable;
  *
  *   [header][entries 0..255][entries 256..511]...[tail, zero padded]
  *
- * Nothing reads these blocks back after a restart yet. The magic, version,
- * sequence number, and CRC exist so that recovery can be added without
- * changing the format.
+ * Recovery reads every payload block to rebuild GC validity information and
+ * checks the payload CRC before accepting the reconstructed mapping state.
  */
 #define ZNS_SST_MAGIC		0x5a4e53535354424bULL	/* "ZNSSSTBK" */
 #define ZNS_SST_VERSION		1u
@@ -53,16 +52,17 @@ struct zns_sstable {
 	sector_t min_key;
 	sector_t max_key;
 	u64 seq;
+	u32 payload_crc;
 };
 
 /*
- * Submit one 4 KiB metadata block and wait for it. The buffer must come from
- * kmalloc() so that it is permanently mapped; no kmap is needed around the
- * sleeping submission. Shared with the superblock, which lives in the same
- * reserved zone.
+ * Submit one 4 KiB block and wait for it. The buffer must come from kmalloc()
+ * so that it is permanently mapped; no kmap is needed around the sleeping
+ * submission.
  */
-int zns_meta_block_rw(struct block_device *bdev, sector_t sector,
-		      unsigned int opf, void *buffer);
+int zns_block_read(struct block_device *bdev, sector_t sector, void *block);
+int zns_block_write(struct block_device *bdev, sector_t sector,
+		    const void *block, unsigned int opf);
 
 /* Total blocks, header included, needed to hold nr_entries mappings. */
 unsigned int zns_sst_nr_blocks(u32 nr_entries);

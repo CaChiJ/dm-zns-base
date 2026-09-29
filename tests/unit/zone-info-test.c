@@ -13,7 +13,7 @@
 
 #define ZONE_TEST_DEVICE "/dev/nullb0"
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 9, 0)
 struct zone_info_bdev_handle {
 	struct file *file;
 	struct block_device *bdev;
@@ -33,6 +33,27 @@ static int zone_info_open_bdev(struct zone_info_bdev_handle *handle)
 static void zone_info_close_bdev(struct zone_info_bdev_handle *handle)
 {
 	fput(handle->file);
+}
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(6, 5, 0)
+struct zone_info_bdev_handle {
+	struct bdev_handle *handle;
+	struct block_device *bdev;
+};
+
+static int zone_info_open_bdev(struct zone_info_bdev_handle *handle)
+{
+	handle->handle = bdev_open_by_path(ZONE_TEST_DEVICE, BLK_OPEN_READ, NULL, NULL);
+	if (IS_ERR(handle->handle)) {
+		return PTR_ERR(handle->handle);
+	}
+
+	handle->bdev = handle->handle->bdev;
+	return 0;
+}
+
+static void zone_info_close_bdev(struct zone_info_bdev_handle *handle)
+{
+	bdev_release(handle->handle);
 }
 #else
 struct zone_info_bdev_handle {

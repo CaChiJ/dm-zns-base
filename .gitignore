@@ -6,6 +6,8 @@
 *.mod.o
 *.cmd
 .*.cmd
+.zns-gc-policy
+__pycache__/
 .tmp_versions/
 modules.order
 Module.symvers

@@ -31,13 +31,15 @@ static unsigned int zns_bdev_nr_zones(struct block_device *bdev)
 static int zns_zone_report_cb(struct blk_zone *reported,
 			      unsigned int index, void *data)
 {
-	struct zns_zone_report_ctx *ctx = data;
 	struct zns_zone *zone;
+	struct zns_zone_report_ctx *ctx = data;
 
-	if (index >= ctx->table->nr_zones)
+	if (index >= ctx->table->nr_zones) {
 		return -EOVERFLOW;
+	}
 
 	zone = &ctx->table->zones[index];
+
 	zone->id = index;
 	zone->start_sector = reported->start;
 	zone->length = reported->len;
@@ -52,10 +54,14 @@ static int zns_zone_report_cb(struct blk_zone *reported,
 static int zns_zone_report_one_cb(struct blk_zone *reported,
 				unsigned int index, void *data)
 {
-	struct zns_zone *zone = data;
+	struct zns_zone *zone;
 
-	if (index || reported->type != BLK_ZONE_TYPE_SEQWRITE_REQ)
+	if (index || reported->type != BLK_ZONE_TYPE_SEQWRITE_REQ) {
 		return -EINVAL;
+	}
+
+	zone = data;
+
 	zone->start_sector = reported->start;
 	zone->length = reported->len;
 	zone->capacity = reported->capacity;
@@ -68,43 +74,49 @@ static int zns_zone_report_one_cb(struct blk_zone *reported,
 int zns_zone_report_one(struct block_device *bdev, sector_t sector,
 			struct zns_zone *zone)
 {
-	int ret;
+	int reported;
 
 	memset(zone, 0, sizeof(*zone));
-	ret = blkdev_report_zones(bdev, sector, 1, zns_zone_report_one_cb, zone);
-	return ret < 0 ? ret : (ret == 1 ? 0 : -EIO);
+	reported = blkdev_report_zones(bdev, sector, 1, zns_zone_report_one_cb, zone);
+
+	return reported < 0 ? reported : (reported == 1 ? 0 : -EIO);
 }
 
 int zns_zone_table_init(struct zns_zone_table *table,
 			struct block_device *bdev)
 {
-	struct zns_zone_report_ctx ctx;
+	struct zns_zone_report_ctx ctx = { .table = table };
 	unsigned int nr_zones;
 	int reported;
 
-	if (!table || !bdev)
+	if (!table || !bdev) {
 		return -EINVAL;
+	}
 
 	table->zones = NULL;
 	table->nr_zones = 0;
 
-	if (!bdev_is_zoned(bdev))
+	if (!bdev_is_zoned(bdev)) {
 		return -ENODEV;
+	}
 
 	nr_zones = zns_bdev_nr_zones(bdev);
-	if (!nr_zones)
+
+	if (!nr_zones) {
 		return -ENODEV;
+	}
 
 	table->zones = kcalloc(nr_zones, sizeof(*table->zones), GFP_KERNEL);
-	if (!table->zones)
+	if (!table->zones) {
 		return -ENOMEM;
+	}
 	table->nr_zones = nr_zones;
 
-	ctx.table = table;
-	reported = blkdev_report_zones(bdev, 0, nr_zones,
-				       zns_zone_report_cb, &ctx);
-	if (reported < 0)
+	reported = blkdev_report_zones(bdev, 0, nr_zones, zns_zone_report_cb, &ctx);
+
+	if (reported < 0) {
 		goto fail;
+	}
 	if (reported != nr_zones) {
 		reported = -EIO;
 		goto fail;
@@ -119,8 +131,9 @@ fail:
 
 void zns_zone_table_destroy(struct zns_zone_table *table)
 {
-	if (!table)
+	if (!table) {
 		return;
+	}
 
 	kfree(table->zones);
 	table->zones = NULL;

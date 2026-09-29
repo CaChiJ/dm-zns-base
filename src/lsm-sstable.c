@@ -122,8 +122,8 @@ int zns_sst_block_find(const void *block, unsigned int nr_in_block,
 	return -ENODATA;
 }
 
-static struct bio *zns_meta_bio_alloc(struct block_device *bdev,
-				      unsigned int opf)
+static struct bio *zns_block_bio_alloc(struct block_device *bdev,
+				       unsigned int opf)
 {
 	struct bio *bio;
 
@@ -140,27 +140,39 @@ static struct bio *zns_meta_bio_alloc(struct block_device *bdev,
 	return bio;
 }
 
-int zns_meta_block_rw(struct block_device *bdev, sector_t sector,
-		      unsigned int opf, void *buffer)
+static int zns_submit_block(struct block_device *bdev, sector_t sector,
+			    unsigned int opf, void *block)
 {
-	struct bio *bio;
+	struct bio *bio = zns_block_bio_alloc(bdev, opf);
 	int ret;
 
-	bio = zns_meta_bio_alloc(bdev, opf);
-	if (!bio)
+	if (!bio) {
 		return -ENOMEM;
+	}
 
 	bio->bi_iter.bi_sector = sector;
-	if (bio_add_page(bio, virt_to_page(buffer), ZNS_SST_BLOCK_BYTES,
-			 offset_in_page(buffer)) != ZNS_SST_BLOCK_BYTES) {
+	if (bio_add_page(bio, virt_to_page(block), ZNS_SST_BLOCK_BYTES,
+			 offset_in_page(block)) != ZNS_SST_BLOCK_BYTES) {
 		bio_put(bio);
 		return -EIO;
 	}
 
 	ret = submit_bio_wait(bio);
+
 	bio_put(bio);
 
 	return ret;
+}
+
+int zns_block_read(struct block_device *bdev, sector_t sector, void *block)
+{
+	return zns_submit_block(bdev, sector, REQ_OP_READ, block);
+}
+
+int zns_block_write(struct block_device *bdev, sector_t sector,
+		    const void *block, unsigned int opf)
+{
+	return zns_submit_block(bdev, sector, opf, (void *)block);
 }
 
 struct zns_sst_write_ctx {
@@ -180,8 +192,7 @@ static int zns_sst_consume_block(struct zns_sst_write_ctx *ctx,
 	if (!ctx->write)
 		return 0;
 
-	ret = zns_meta_block_rw(ctx->bdev, ctx->sector, REQ_OP_WRITE,
-				   (void *)block);
+	ret = zns_block_write(ctx->bdev, ctx->sector, block, REQ_OP_WRITE);
 	if (ret)
 		return ret;
 
@@ -306,7 +317,7 @@ int zns_sst_write(struct block_device *bdev, struct lsm_memtable *memtable,
 		goto free_block;
 
 	zns_sst_encode_header(block, sst, ctx.crc);
-	ret = zns_meta_block_rw(bdev, start_sector, REQ_OP_WRITE, block);
+	ret = zns_block_write(bdev, start_sector, block, REQ_OP_WRITE);
 	if (ret)
 		goto free_block;
 	*consumed = ZNS_SST_BLOCK_SECTORS;
@@ -361,11 +372,11 @@ int zns_sst_load(struct block_device *bdev, sector_t sector, sector_t limit,
 		goto free_sst;
 	}
 
-	ret = zns_meta_block_rw(bdev, sector, REQ_OP_READ, block);
+	ret = zns_block_read(bdev, sector, block);
 	if (ret)
 		goto free_block;
 
-	ret = zns_sst_decode_header(block, sst, NULL);
+	ret = zns_sst_decode_header(block, sst, &sst->payload_crc);
 	if (ret)
 		goto free_block;
 
@@ -402,7 +413,7 @@ static int zns_sst_read_payload_block(struct block_device *bdev,
 
 	sector = sst->start_sector +
 		 (sector_t)(block_index + 1) * ZNS_SST_BLOCK_SECTORS;
-	ret = zns_meta_block_rw(bdev, sector, REQ_OP_READ, block);
+	ret = zns_block_read(bdev, sector, block);
 	if (ret)
 		return ret;
 

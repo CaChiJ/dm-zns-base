@@ -124,7 +124,7 @@ int zns_super_write(struct block_device *bdev, sector_t sector,
 		return -ENOMEM;
 
 	zns_super_encode(block, super);
-	ret = zns_meta_block_rw(bdev, sector, REQ_OP_WRITE, block);
+	ret = zns_block_write(bdev, sector, block, REQ_OP_WRITE);
 
 	kfree(block);
 	return ret;
@@ -143,7 +143,7 @@ int zns_super_read(struct block_device *bdev, sector_t sector,
 	if (!block)
 		return -ENOMEM;
 
-	ret = zns_meta_block_rw(bdev, sector, REQ_OP_READ, block);
+	ret = zns_block_read(bdev, sector, block);
 	if (!ret)
 		ret = zns_super_decode(block, super);
 

@@ -463,6 +463,72 @@ free_results:
 	return ret;
 }
 
+static int allocator_test_reserve_rotation(void)
+{
+	struct zns_zone zones[] = {
+		{ .id = 0, .start_sector = 0, .length = 16,
+		  .capacity = 16, .write_pointer = 0,
+		  .condition = BLK_ZONE_COND_EMPTY },
+		{ .id = 1, .start_sector = 16, .length = 16,
+		  .capacity = 16, .write_pointer = 16,
+		  .condition = BLK_ZONE_COND_EMPTY },
+		{ .id = 2, .start_sector = 32, .length = 16,
+		  .capacity = 16, .write_pointer = 32,
+		  .condition = BLK_ZONE_COND_EMPTY },
+	};
+	struct zns_allocator allocator;
+	sector_t sector;
+	int ret;
+
+	ret = zns_allocator_init_zoned(&allocator, zones, ARRAY_SIZE(zones), 8);
+	if (ret) {
+		return ret;
+	}
+	ret = zns_allocator_set_reserve(&allocator, 2);
+	if (ret) {
+		goto out;
+	}
+	ret = zns_allocator_alloc(&allocator, &sector);
+	if (ret || sector != 0) {
+		goto bad;
+	}
+	ret = zns_allocator_alloc(&allocator, &sector);
+	if (ret || sector != 8) {
+		goto bad;
+	}
+	ret = zns_allocator_alloc(&allocator, &sector);
+	if (ret || sector != 16) {
+		goto bad;
+	}
+	ret = zns_allocator_alloc(&allocator, &sector);
+	if (ret || sector != 24) {
+		goto bad;
+	}
+	if (zns_allocator_has_space(&allocator) ||
+	    zns_allocator_alloc(&allocator, &sector) != -ENOSPC) {
+		goto bad;
+	}
+	ret = zns_allocator_alloc_gc(&allocator, &sector);
+	if (ret || sector != 32) {
+		goto bad;
+	}
+	ret = zns_allocator_set_reserve_after_reset(&allocator, 0);
+	if (ret) {
+		goto out;
+	}
+	ret = zns_allocator_alloc(&allocator, &sector);
+	if (ret || sector != 40 || allocator.reserve_zone != 0) {
+		goto bad;
+	}
+	ret = 0;
+	goto out;
+bad:
+	ret = -EINVAL;
+out:
+	zns_allocator_exit(&allocator);
+	return ret;
+}
+
 static int allocator_test_resync(void)
 {
 	/* Reserve the last block to exercise active_zone rollback as well. */
@@ -496,21 +562,25 @@ static int allocator_test_resync(void)
 	for (i = 0; i < ARRAY_SIZE(cases); i++) {
 		ret = zns_allocator_init_zoned(&allocator, zones, 2,
 					       TEST_BLOCK_SECTORS);
-		if (ret)
+		if (ret) {
 			return ret;
+		}
 		ret = zns_allocator_alloc(&allocator, &sector);
-		if (ret || sector != 8 || allocator.active_zone != 1)
+		if (ret || sector != 8 || allocator.active_zone != 1) {
 			goto fail;
+		}
 		reported = zones[0];
 		reported.write_pointer = cases[i].wp;
 		reported.condition = cases[i].condition;
 		ret = zns_allocator_resync(&allocator, sector, &reported);
 		if (cases[i].valid) {
-			if (ret)
+			if (ret) {
 				goto fail;
+			}
 			ret = zns_allocator_alloc(&allocator, &sector);
-			if (ret || sector != cases[i].next)
+			if (ret || sector != cases[i].next) {
 				goto fail;
+			}
 		} else if (!ret || allocator.zones[0].write_pointer != 16 ||
 			   allocator.zones[0].condition != BLK_ZONE_COND_CLOSED ||
 			   allocator.active_zone != 1) {
@@ -525,6 +595,8 @@ fail:
 }
 
 static const struct zns_test_case allocator_cases[] = {
+	ZNS_TEST_CASE(allocator_test_reserve_rotation,
+		      "when GC rotates zones, ordinary writes never use the reserve"),
 	ZNS_TEST_CASE(allocator_test_resync,
 		      "when a write fails, only safe WP reports resume allocation at the correct block"),
 	ZNS_TEST_CASE(allocator_test_sequential,

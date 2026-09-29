@@ -20,6 +20,7 @@ ZNS_KO_PATH="$ZNS_SRC_DIR/$ZNS_MOD_NAME.ko"
 # Engine the test needs. A test script sets ZNS_REQUIRED_ENGINE before
 # sourcing lib/init.sh; the environment still wins so a run can be retargeted.
 ZNS_ENGINE=${ZNS_ENGINE:-${ZNS_REQUIRED_ENGINE:-lsm}}
+ZNS_GC_POLICY=${ZNS_GC_POLICY:-simple}
 
 UNDERLYING=${UNDERLYING:-/dev/nullb0}
 
@@ -106,19 +107,19 @@ require_zones() {
 build_engine() {
 	local engine=${1:-$ZNS_ENGINE}
 
-	if [ "${ZNS_ENGINE_BUILT:-}" = "$engine" ] && [ -f "$ZNS_KO_PATH" ]; then
+	if [ "${ZNS_ENGINE_BUILT:-}" = "$engine:$ZNS_GC_POLICY" ] && [ -f "$ZNS_KO_PATH" ]; then
 		return 0
 	fi
 
 	log_step "building the $engine engine"
-	run_make -C "$ZNS_SRC_DIR" clean ZNS_ENGINE="$engine" ||
+	run_make -C "$ZNS_SRC_DIR" clean ZNS_ENGINE="$engine" ZNS_GC_POLICY="$ZNS_GC_POLICY" ||
 		die "failed to clean the $engine build"
-	run_make -C "$ZNS_SRC_DIR" ZNS_ENGINE="$engine" ||
+	run_make -C "$ZNS_SRC_DIR" ZNS_ENGINE="$engine" ZNS_GC_POLICY="$ZNS_GC_POLICY" ||
 		die "failed to build the $engine engine"
 	[ -f "$ZNS_KO_PATH" ] ||
 		die "the module was not produced: $ZNS_KO_PATH"
 
-	ZNS_ENGINE_BUILT=$engine
+	ZNS_ENGINE_BUILT="$engine:$ZNS_GC_POLICY"
 	export ZNS_ENGINE_BUILT
 	return 0
 }
