@@ -144,6 +144,7 @@ static int zns_submit_block(struct block_device *bdev, sector_t sector,
 			    unsigned int opf, void *block)
 {
 	struct bio *bio = zns_block_bio_alloc(bdev, opf);
+	int ret;
 
 	if (!bio) {
 		return -ENOMEM;
@@ -156,7 +157,7 @@ static int zns_submit_block(struct block_device *bdev, sector_t sector,
 		return -EIO;
 	}
 
-	int ret = submit_bio_wait(bio);
+	ret = submit_bio_wait(bio);
 
 	bio_put(bio);
 

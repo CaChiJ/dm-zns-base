@@ -139,6 +139,9 @@ struct zns_lsm {
 
 sector_t zns_engine_capacity(struct block_device *lower_bdev)
 {
+	unsigned int i;
+	sector_t data_sectors;
+	sector_t largest_data_zone_sectors;
 	struct zns_zone_table table;
 
 	if (zns_zone_table_init(&table, lower_bdev)) {
@@ -149,10 +152,10 @@ sector_t zns_engine_capacity(struct block_device *lower_bdev)
 		return 0;
 	}
 
-	sector_t data_sectors = 0;
-	sector_t largest_data_zone_sectors = 0;
+	data_sectors = 0;
+	largest_data_zone_sectors = 0;
 
-	for (unsigned int i = 0; i < table.nr_zones - ZNS_LSM_METADATA_ZONES; i++) {
+	for (i = 0; i < table.nr_zones - ZNS_LSM_METADATA_ZONES; i++) {
 		sector_t zone_capacity = table.zones[i].capacity;
 		sector_t usable_sectors = zone_capacity - zone_capacity % ZNS_BASE_BLOCK_SECTORS;
 
@@ -170,7 +173,9 @@ sector_t zns_engine_capacity(struct block_device *lower_bdev)
 static int zns_lsm_physical_to_gc_slot(struct zns_lsm *lsm, sector_t physical_sector,
 				       unsigned int *zone_id, sector_t *slot)
 {
-	for (unsigned int i = 0; i < lsm->allocator.nr_zones; i++) {
+	unsigned int i;
+
+	for (i = 0; i < lsm->allocator.nr_zones; i++) {
 		const struct zns_zone *z = &lsm->allocator.zones[i];
 
 		if (physical_sector < z->start_sector ||
@@ -192,8 +197,10 @@ static int zns_lsm_physical_to_gc_slot(struct zns_lsm *lsm, sector_t physical_se
 
 static void zns_lsm_gc_map_exit(struct zns_lsm *lsm)
 {
+	unsigned int i;
+
 	if (lsm->gc_zones) {
-		for (unsigned int i = 0; i < lsm->allocator.nr_zones; i++) {
+		for (i = 0; i < lsm->allocator.nr_zones; i++) {
 			kvfree(lsm->gc_zones[i].logical_blocks);
 		}
 		kfree(lsm->gc_zones);
@@ -203,11 +210,13 @@ static void zns_lsm_gc_map_exit(struct zns_lsm *lsm)
 
 static int zns_lsm_gc_map_init(struct zns_lsm *lsm)
 {
+	unsigned int i;
+
 	lsm->gc_zones = kcalloc(lsm->allocator.nr_zones, sizeof(*lsm->gc_zones), GFP_KERNEL);
 	if (!lsm->gc_zones) {
 		return -ENOMEM;
 	}
-	for (unsigned int i = 0; i < lsm->allocator.nr_zones; i++) {
+	for (i = 0; i < lsm->allocator.nr_zones; i++) {
 		struct zns_gc_zone *zone = &lsm->gc_zones[i];
 		sector_t capacity = lsm->allocator.zones[i].capacity;
 
@@ -228,6 +237,11 @@ static int zns_lsm_gc_map_init(struct zns_lsm *lsm)
  */
 static int zns_lsm_update_gc_block_location(struct zns_lsm *lsm, sector_t logical_block, sector_t physical_sector)
 {
+	struct zns_gc_zone *new_zone;
+	void *old_entry;
+	bool is_overwrite;
+	struct zns_gc_zone *old_zone;
+	sector_t old_slot;
 	sector_t logical_entry = zns_gc_encode_logical_block(logical_block);
 
 	/* The new location must be a written data block that no block owns yet. */
@@ -239,17 +253,17 @@ static int zns_lsm_update_gc_block_location(struct zns_lsm *lsm, sector_t logica
 		return ret;
 	}
 
-	struct zns_gc_zone *new_zone = &lsm->gc_zones[new_zone_id];
+	new_zone = &lsm->gc_zones[new_zone_id];
 
 	if (new_zone->logical_blocks[new_slot]) {
 		return -EINVAL;
 	}
 
 	/* On overwrite, the previous location must still record this block. */
-	void *old_entry = xa_load(&lsm->latest, logical_block);
-	bool is_overwrite = old_entry != NULL;
-	struct zns_gc_zone *old_zone = NULL;
-	sector_t old_slot = 0;
+	old_entry = xa_load(&lsm->latest, logical_block);
+	is_overwrite = old_entry != NULL;
+	old_zone = NULL;
+	old_slot = 0;
 
 	if (is_overwrite) {
 		unsigned int old_zone_id;
@@ -286,6 +300,9 @@ static int zns_lsm_update_gc_block_location(struct zns_lsm *lsm, sector_t logica
 /* Called newest first during recovery, before any user I/O can run. */
 static int zns_lsm_gc_restore_entry(struct zns_lsm *lsm, const struct zns_sst_disk_entry *entry)
 {
+	unsigned int zone;
+	sector_t slot;
+	int ret;
 	sector_t logical_block = le64_to_cpu(entry->logical_block);
 	sector_t physical_sector = le64_to_cpu(entry->physical_sector);
 
@@ -297,9 +314,7 @@ static int zns_lsm_gc_restore_entry(struct zns_lsm *lsm, const struct zns_sst_di
 		return 0;
 	}
 
-	unsigned int zone;
-	sector_t slot;
-	int ret = zns_lsm_physical_to_gc_slot(lsm, physical_sector, &zone, &slot);
+	ret = zns_lsm_physical_to_gc_slot(lsm, physical_sector, &zone, &slot);
 
 	if (ret || lsm->gc_zones[zone].logical_blocks[slot]) {
 		return -EINVAL;
@@ -319,20 +334,23 @@ static int zns_lsm_gc_restore_entry(struct zns_lsm *lsm, const struct zns_sst_di
 /* SSTables are newest first. Ignore older copies of a logical block. */
 static int zns_lsm_gc_rebuild(struct zns_lsm *lsm)
 {
+	int ret;
+	struct zns_sstable *sst;
 	void *block = kmalloc(ZNS_SST_BLOCK_BYTES, GFP_KERNEL);
 
 	if (!block) {
 		return -ENOMEM;
 	}
 
-	int ret = 0;
-	struct zns_sstable *sst;
+	ret = 0;
 
 	list_for_each_entry(sst, &lsm->sstables, list) {
 		u32 crc = 0;
+		unsigned int page;
 
-		for (unsigned int page = 0; page + 1 < sst->nr_blocks; page++) {
+		for (page = 0; page + 1 < sst->nr_blocks; page++) {
 			struct zns_sst_disk_entry *entries = block;
+			unsigned int count, j;
 
 			ret = zns_block_read(lsm->lower_bdev,
 				sst->start_sector + (page + 1) * ZNS_SST_BLOCK_SECTORS,
@@ -341,9 +359,9 @@ static int zns_lsm_gc_rebuild(struct zns_lsm *lsm)
 				goto out;
 			}
 			crc = crc32_le(crc, block, ZNS_SST_BLOCK_BYTES);
-			unsigned int count = zns_sst_entries_in_block(sst->nr_entries, page);
+			count = zns_sst_entries_in_block(sst->nr_entries, page);
 
-			for (unsigned int j = 0; j < count; j++) {
+			for (j = 0; j < count; j++) {
 				ret = zns_lsm_gc_restore_entry(lsm, &entries[j]);
 				if (ret) {
 					goto out;
@@ -514,23 +532,22 @@ static void zns_lsm_flush_worker(struct work_struct *work)
 
 	for (;;) {
 		struct lsm_memtable *victim = zns_lsm_claim_flush_victim(lsm);
+		struct zns_sstable *sst;
+		sector_t start, consumed;
+		u64 seq;
+		int ret;
 
 		if (!victim) {
 			break;
 		}
-
-		sector_t start;
-		u64 seq;
 
 		mutex_lock(&lsm->sst_lock);
 		start = lsm->meta_wp;
 		seq = lsm->next_sst_seq;
 		mutex_unlock(&lsm->sst_lock);
 
-		struct zns_sstable *sst;
-		sector_t consumed;
-		int ret = zns_sst_write(lsm->lower_bdev, victim, start,
-					    lsm->meta_end, seq, &sst, &consumed);
+		ret = zns_sst_write(lsm->lower_bdev, victim, start,
+				    lsm->meta_end, seq, &sst, &consumed);
 
 		if (consumed) {
 			zns_lsm_advance_meta_wp(lsm, start, consumed);
@@ -568,12 +585,15 @@ static void zns_lsm_flush_worker(struct work_struct *work)
 static int zns_lsm_read(struct zns_lsm *lsm, sector_t logical_sector,
 			unsigned int sectors, sector_t *physical_sector)
 {
+	sector_t logical_block;
+	int ret;
+
 	if (!zns_lsm_is_aligned_io(lsm, logical_sector, sectors)) {
 		return -EINVAL;
 	}
 
-	sector_t logical_block = logical_sector / lsm->sectors_per_block;
-	int ret = zns_lsm_lookup_memtables(lsm, logical_block, physical_sector);
+	logical_block = logical_sector / lsm->sectors_per_block;
+	ret = zns_lsm_lookup_memtables(lsm, logical_block, physical_sector);
 
 	if (ret == -ENODATA) {
 		ret = zns_lsm_lookup_sstables(lsm, logical_block, physical_sector);
@@ -590,13 +610,16 @@ static int zns_lsm_copy_fragment(struct bio *bio, unsigned int offset,
 	unsigned int copied = 0;
 
 	bio_for_each_segment(bv, bio, iter) {
+		unsigned int chunk;
+		void *mapped;
+
 		if (offset >= bv.bv_len) {
 			offset -= bv.bv_len;
 			continue;
 		}
 
-		unsigned int chunk = min(bytes - copied, bv.bv_len - offset);
-		void *mapped = bvec_kmap_local(&bv);
+		chunk = min(bytes - copied, bv.bv_len - offset);
+		mapped = bvec_kmap_local(&bv);
 
 		if (to_bio) {
 			memcpy((char *)mapped + offset, (char *)buffer + copied, chunk);
@@ -623,16 +646,20 @@ static int zns_lsm_copy_fragment(struct bio *bio, unsigned int offset,
  */
 static int zns_lsm_read_partial(struct zns_lsm *lsm, struct bio *bio)
 {
+	sector_t sector;
+	unsigned int remaining;
+	unsigned int bio_offset;
+	int ret;
 	void *buffer = kmalloc(ZNS_SST_BLOCK_BYTES, GFP_NOIO);
 
 	if (!buffer) {
 		return -ENOMEM;
 	}
 
-	sector_t sector = bio->bi_iter.bi_sector;
-	unsigned int remaining = bio_sectors(bio);
-	unsigned int bio_offset = 0;
-	int ret = 0;
+	sector = bio->bi_iter.bi_sector;
+	remaining = bio_sectors(bio);
+	bio_offset = 0;
+	ret = 0;
 
 	while (remaining) {
 		unsigned int offset = sector % lsm->sectors_per_block;
@@ -728,14 +755,16 @@ static struct zns_gc_zone_info zns_lsm_gc_get_zone_info(const struct zns_gc_cont
 
 static int zns_lsm_gc_validate_victim(struct zns_lsm *lsm, unsigned int id)
 {
+	const struct zns_zone *victim_zone;
+	const struct zns_zone *reserve_zone;
 	struct zns_allocator *allocator = &lsm->allocator;
 
 	if (id >= allocator->nr_zones || id == allocator->reserve_zone ||
 	    allocator->reserve_zone >= allocator->nr_zones) {
 		return -EINVAL;
 	}
-	const struct zns_zone *victim_zone = &allocator->zones[id];
-	const struct zns_zone *reserve_zone = &allocator->zones[allocator->reserve_zone];
+	victim_zone = &allocator->zones[id];
+	reserve_zone = &allocator->zones[allocator->reserve_zone];
 
 	if (victim_zone->condition == BLK_ZONE_COND_READONLY ||
 	    victim_zone->condition == BLK_ZONE_COND_OFFLINE) {
@@ -751,13 +780,12 @@ static int zns_lsm_gc_validate_victim(struct zns_lsm *lsm, unsigned int id)
 static int zns_lsm_gc_relocate_block(struct zns_lsm *lsm, sector_t logical_block,
 				   sector_t source_sector, void *buffer)
 {
+	sector_t destination_sector;
 	int ret = zns_block_read(lsm->lower_bdev, source_sector, buffer);
 
 	if (ret) {
 		return ret;
 	}
-
-	sector_t destination_sector;
 
 	ret = zns_allocator_alloc_gc(&lsm->allocator, &destination_sector);
 	if (ret) {
@@ -786,31 +814,38 @@ static int zns_lsm_gc_relocate_block(struct zns_lsm *lsm, sector_t logical_block
 /* Caller is the ordered I/O worker; no user I/O can change the victim here. */
 static int zns_lsm_gc_clean(struct zns_lsm *lsm, unsigned int id)
 {
+	sector_t slot;
+	struct zns_allocator *allocator;
+	struct zns_zone *device_zone;
+	struct zns_gc_zone *victim_zone;
+	void *buffer;
 	int ret = zns_lsm_gc_validate_victim(lsm, id);
 
 	if (ret) {
 		return ret;
 	}
 
-	struct zns_allocator *allocator = &lsm->allocator;
-	struct zns_zone *device_zone = &allocator->zones[id];
-	struct zns_gc_zone *victim_zone = &lsm->gc_zones[id];
+	allocator = &lsm->allocator;
+	device_zone = &allocator->zones[id];
+	victim_zone = &lsm->gc_zones[id];
 
 	/* Nothing has moved yet: allocation failure alone does not stop writes. */
-	void *buffer = kmalloc(ZNS_SST_BLOCK_BYTES, GFP_NOIO);
+	buffer = kmalloc(ZNS_SST_BLOCK_BYTES, GFP_NOIO);
 
 	if (!buffer) {
 		return -ENOMEM;
 	}
 
 	/* Each successful relocation also removes the source from victim_zone. */
-	for (sector_t slot = 0; slot < victim_zone->nr_blocks; slot++) {
+	for (slot = 0; slot < victim_zone->nr_blocks; slot++) {
+		sector_t logical_block, source_sector;
+
 		if (!victim_zone->logical_blocks[slot]) {
 			continue;
 		}
 
-		sector_t logical_block = zns_gc_decode_logical_block(victim_zone->logical_blocks[slot]);
-		sector_t source_sector = device_zone->start_sector + slot * lsm->sectors_per_block;
+		logical_block = zns_gc_decode_logical_block(victim_zone->logical_blocks[slot]);
+		source_sector = device_zone->start_sector + slot * lsm->sectors_per_block;
 
 		ret = zns_lsm_gc_relocate_block(lsm, logical_block, source_sector, buffer);
 		if (ret) {
@@ -855,12 +890,16 @@ out:
 
 static int zns_lsm_run_gc_if_needed(struct zns_lsm *lsm)
 {
+	struct zns_gc_context ctx;
+	const struct zns_zone *reserve;
+	int victim;
+
 	if (lsm->allocator.reserve_zone >= lsm->allocator.nr_zones) {
 		return -EINVAL;
 	}
 
-	const struct zns_zone *reserve = &lsm->allocator.zones[lsm->allocator.reserve_zone];
-	struct zns_gc_context ctx = {
+	reserve = &lsm->allocator.zones[lsm->allocator.reserve_zone];
+	ctx = (struct zns_gc_context) {
 		.private = lsm,
 		.nr_zones = lsm->allocator.nr_zones,
 		.has_write_space = zns_allocator_has_space(&lsm->allocator),
@@ -871,7 +910,7 @@ static int zns_lsm_run_gc_if_needed(struct zns_lsm *lsm)
 		return 0;
 	}
 
-	int victim = zns_gc_policy.select_victim(&ctx);
+	victim = zns_gc_policy.select_victim(&ctx);
 
 	if (victim < 0) {
 		return victim;
@@ -886,17 +925,18 @@ static int zns_lsm_run_gc_if_needed(struct zns_lsm *lsm)
 static int zns_lsm_append_write(struct zns_lsm *lsm, sector_t logical_sector,
 			      struct bio *clone, void *buffer, unsigned int opf)
 {
+	int ret;
+	sector_t physical_sector;
+
 	if (lsm->writes_stopped) {
 		return -EIO;
 	}
 
-	int ret = zns_lsm_run_gc_if_needed(lsm);
+	ret = zns_lsm_run_gc_if_needed(lsm);
 
 	if (ret) {
 		return ret;
 	}
-
-	sector_t physical_sector;
 
 	ret = zns_allocator_alloc(&lsm->allocator, &physical_sector);
 	if (ret) {
@@ -944,20 +984,26 @@ static int zns_lsm_append_write(struct zns_lsm *lsm, sector_t logical_sector,
 
 static int zns_lsm_write_partial(struct zns_lsm *lsm, struct bio *bio)
 {
+	void *buffer;
+	sector_t sector;
+	unsigned int remaining;
+	unsigned int bio_offset;
+	int ret;
+
 	if (lsm->writes_stopped) {
 		return -EIO;
 	}
 
-	void *buffer = kmalloc(ZNS_SST_BLOCK_BYTES, GFP_NOIO);
+	buffer = kmalloc(ZNS_SST_BLOCK_BYTES, GFP_NOIO);
 
 	if (!buffer) {
 		return -ENOMEM;
 	}
 
-	sector_t sector = bio->bi_iter.bi_sector;
-	unsigned int remaining = bio_sectors(bio);
-	unsigned int bio_offset = 0;
-	int ret = 0;
+	sector = bio->bi_iter.bi_sector;
+	remaining = bio_sectors(bio);
+	bio_offset = 0;
+	ret = 0;
 
 	while (remaining) {
 		unsigned int offset = sector % lsm->sectors_per_block;
@@ -1025,6 +1071,8 @@ static struct bio *zns_lsm_clone_bio(struct zns_lsm *lsm, struct bio *bio)
  */
 static void zns_lsm_io_worker(struct work_struct *work)
 {
+	struct bio *clone;
+	sector_t physical_sector;
 	struct zns_lsm_io_work *ctx =
 		container_of(work, struct zns_lsm_io_work, work);
 	struct zns_lsm *lsm = ctx->lsm;
@@ -1041,14 +1089,14 @@ static void zns_lsm_io_worker(struct work_struct *work)
 		}
 	}
 
-	struct bio *clone = zns_lsm_clone_bio(lsm, bio);
+	clone = zns_lsm_clone_bio(lsm, bio);
 
 	if (!clone) {
 		ret = -ENOMEM;
 		goto complete;
 	}
 
-	sector_t physical_sector = 0;
+	physical_sector = 0;
 
 	switch (bio_op(bio)) {
 	case REQ_OP_READ:
@@ -1171,7 +1219,9 @@ static int zns_lsm_recover_sstables(struct zns_lsm *lsm)
 
 static bool zns_lsm_data_zones_dirty(const struct zns_lsm *lsm)
 {
-	for (unsigned int i = 0; i + 1 < lsm->zone_table.nr_zones; i++) {
+	unsigned int i;
+
+	for (i = 0; i + 1 < lsm->zone_table.nr_zones; i++) {
 		if (lsm->zone_table.zones[i].write_pointer != lsm->zone_table.zones[i].start_sector) {
 			return true;
 		}
@@ -1193,11 +1243,15 @@ static bool zns_lsm_data_zones_dirty(const struct zns_lsm *lsm)
  */
 static int zns_lsm_open_metadata(struct zns_lsm *lsm, sector_t logical_sectors)
 {
+	const struct zns_zone *meta;
+	sector_t metadata_write_pointer;
+	int ret;
+
 	if (lsm->zone_table.nr_zones < 2) {
 		return -EINVAL;
 	}
 
-	const struct zns_zone *meta = &lsm->zone_table.zones[lsm->zone_table.nr_zones - 1];
+	meta = &lsm->zone_table.zones[lsm->zone_table.nr_zones - 1];
 
 	if (meta->capacity < ZNS_SST_BLOCK_SECTORS) {
 		return -EINVAL;
@@ -1218,8 +1272,6 @@ static int zns_lsm_open_metadata(struct zns_lsm *lsm, sector_t logical_sectors)
 	 * and refusing here would mean a metadata zone can be filled once and
 	 * then never opened again.
 	 */
-	sector_t metadata_write_pointer;
-
 	if (meta->condition == BLK_ZONE_COND_FULL) {
 		metadata_write_pointer = lsm->meta_end;
 	} else {
@@ -1261,7 +1313,7 @@ static int zns_lsm_open_metadata(struct zns_lsm *lsm, sector_t logical_sectors)
 	}
 
 	lsm->super.uuid = get_random_u64();
-	int ret = zns_super_write(lsm->lower_bdev, lsm->meta_start, &lsm->super);
+	ret = zns_super_write(lsm->lower_bdev, lsm->meta_start, &lsm->super);
 
 	if (ret) {
 		return ret;
@@ -1276,6 +1328,10 @@ int zns_engine_init(struct zns_engine *engine, struct block_device *lower_bdev,
 		    sector_t logical_sectors, sector_t physical_sectors,
 		    sector_t sectors_per_block)
 {
+	unsigned int id;
+	struct zns_lsm *lsm;
+	int ret;
+
 	if (!engine || !lower_bdev || !sectors_per_block ||
 	    !zns_lsm_memtable_threshold ||
 	    sectors_per_block != ZNS_SST_BLOCK_SECTORS ||
@@ -1284,7 +1340,7 @@ int zns_engine_init(struct zns_engine *engine, struct block_device *lower_bdev,
 		return -EINVAL;
 	}
 
-	struct zns_lsm *lsm = kzalloc(sizeof(*lsm), GFP_KERNEL);
+	lsm = kzalloc(sizeof(*lsm), GFP_KERNEL);
 
 	if (!lsm) {
 		return -ENOMEM;
@@ -1313,7 +1369,7 @@ int zns_engine_init(struct zns_engine *engine, struct block_device *lower_bdev,
 	INIT_LIST_HEAD(&lsm->sstables);
 	INIT_WORK(&lsm->flush_work, zns_lsm_flush_worker);
 
-	int ret = zns_zone_table_init(&lsm->zone_table, lower_bdev);
+	ret = zns_zone_table_init(&lsm->zone_table, lower_bdev);
 
 	if (ret) {
 		goto free_lsm;
@@ -1343,7 +1399,7 @@ int zns_engine_init(struct zns_engine *engine, struct block_device *lower_bdev,
 	}
 	/* Always reserve one genuinely empty data zone, including on restart. */
 	ret = -ENOSPC;
-	for (unsigned int id = lsm->allocator.nr_zones; id > 0; id--) {
+	for (id = lsm->allocator.nr_zones; id > 0; id--) {
 		if (!zns_allocator_set_reserve(&lsm->allocator, id - 1)) {
 			ret = 0;
 			break;
@@ -1406,22 +1462,25 @@ free_lsm:
  */
 static void zns_lsm_flush_all_sync(struct zns_lsm *lsm)
 {
+	unsigned int i;
 	struct lsm_memtable *generations[] = {
 		lsm->flushing_memtable,
 		lsm->immutable_memtable,
 		lsm->active_memtable,
 	};
 
-	for (unsigned int i = 0; i < ARRAY_SIZE(generations); i++) {
+	for (i = 0; i < ARRAY_SIZE(generations); i++) {
+		struct zns_sstable *sst;
+		sector_t consumed;
+		int ret;
+
 		if (!generations[i]) {
 			continue;
 		}
 
-		struct zns_sstable *sst;
-		sector_t consumed;
-		int ret = zns_sst_write(lsm->lower_bdev, generations[i],
-					    lsm->meta_wp, lsm->meta_end,
-					    lsm->next_sst_seq, &sst, &consumed);
+		ret = zns_sst_write(lsm->lower_bdev, generations[i],
+				    lsm->meta_wp, lsm->meta_end,
+				    lsm->next_sst_seq, &sst, &consumed);
 
 		lsm->meta_wp += consumed;
 
@@ -1446,11 +1505,13 @@ static void zns_lsm_flush_all_sync(struct zns_lsm *lsm)
 
 void zns_engine_exit(struct zns_engine *engine)
 {
+	struct zns_lsm *lsm;
+
 	if (!engine) {
 		return;
 	}
 
-	struct zns_lsm *lsm = engine->private;
+	lsm = engine->private;
 
 	if (!lsm) {
 		return;
@@ -1477,11 +1538,13 @@ void zns_engine_exit(struct zns_engine *engine)
 
 int zns_engine_map(struct zns_engine *engine, struct bio *bio)
 {
+	struct zns_lsm *lsm;
+
 	if (!engine || !bio) {
 		return DM_MAPIO_KILL;
 	}
 
-	struct zns_lsm *lsm = engine->private;
+	lsm = engine->private;
 
 	if (!lsm) {
 		return DM_MAPIO_KILL;
@@ -1508,23 +1571,23 @@ int zns_engine_map(struct zns_engine *engine, struct bio *bio)
 void zns_engine_status(struct zns_engine *engine, char *result,
 		       unsigned int maxlen)
 {
+	struct zns_lsm *lsm;
+	unsigned int active, immutable, flushing;
+	unsigned int nr_sstables;
+	unsigned long long nr_sst_entries, meta_used;
 	unsigned int sz = 0;
 
 	if (!engine || !engine->private) {
 		DMEMIT("lsm uninitialized");
 		return;
 	}
-	struct zns_lsm *lsm = engine->private;
-	unsigned int active, immutable, flushing;
+	lsm = engine->private;
 
 	mutex_lock(&lsm->table_lock);
 	active = memtable_size(lsm->active_memtable);
 	immutable = memtable_size(lsm->immutable_memtable);
 	flushing = memtable_size(lsm->flushing_memtable);
 	mutex_unlock(&lsm->table_lock);
-
-	unsigned int nr_sstables;
-	unsigned long long nr_sst_entries, meta_used;
 
 	mutex_lock(&lsm->sst_lock);
 	nr_sstables = lsm->nr_sstables;

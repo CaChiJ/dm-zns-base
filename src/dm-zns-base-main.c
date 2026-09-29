@@ -19,26 +19,30 @@ struct zns_base_c {
 
 static int zns_base_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 {
+	struct zns_base_c *c;
+	int ret;
+	sector_t capacity;
+
 	if (argc != 1) {
 		ti->error = "expected one argument: underlying device";
 		return -EINVAL;
 	}
 
-	struct zns_base_c *c = kzalloc(sizeof(*c), GFP_KERNEL);
+	c = kzalloc(sizeof(*c), GFP_KERNEL);
 
 	if (!c) {
 		ti->error = "out of memory";
 		return -ENOMEM;
 	}
 
-	int ret = dm_get_device(ti, argv[0], dm_table_get_mode(ti->table), &c->dev);
+	ret = dm_get_device(ti, argv[0], dm_table_get_mode(ti->table), &c->dev);
 
 	if (ret) {
 		ti->error = "failed to open underlying device";
 		kfree(c);
 		return ret;
 	}
-	sector_t capacity = zns_engine_capacity(c->dev->bdev);
+	capacity = zns_engine_capacity(c->dev->bdev);
 
 	if (!capacity || ti->len > capacity) {
 		ti->error = "target exceeds usable logical capacity";

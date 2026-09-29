@@ -9,7 +9,9 @@ static bool should_gc(const struct zns_gc_context *ctx)
 
 static int select_victim(const struct zns_gc_context *ctx)
 {
-	for (unsigned int zone = 0; zone < ctx->nr_zones; zone++) {
+	unsigned int zone;
+
+	for (zone = 0; zone < ctx->nr_zones; zone++) {
 		struct zns_gc_zone_info info = ctx->get_zone_info(ctx, zone);
 
 		if (!info.is_reserve && info.resettable && !info.free_blocks &&
