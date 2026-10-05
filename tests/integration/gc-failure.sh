@@ -10,7 +10,6 @@ ZNS_REQUIRED_ENGINE=lsm
 # shellcheck disable=SC2034
 ZNS_GC_POLICY=simple
 TEST_DEVICE_NAME="nullb-gc-$$"
-UNDERLYING="/dev/$TEST_DEVICE_NAME"
 TEST_DEVICE_CONFIG="/sys/kernel/config/nullb/$TEST_DEVICE_NAME"
 TESTS_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 # shellcheck source=tests/lib/init.sh
@@ -32,6 +31,8 @@ cleanup() {
 trap cleanup EXIT
 
 create_test_device() {
+	local device_index deadline
+
 	[ -d /sys/kernel/config/nullb ] ||
 		die "null_blk configfs is unavailable"
 	mkdir "$TEST_DEVICE_CONFIG"
@@ -41,7 +42,12 @@ create_test_device() {
 	echo 1 >"$TEST_DEVICE_CONFIG/memory_backed"
 	echo 1 >"$TEST_DEVICE_CONFIG/power"
 
-	local deadline=$((SECONDS + 10))
+	# Configfs names do not determine the kernel's /dev/nullbN name.
+	device_index=$(cat "$TEST_DEVICE_CONFIG/index")
+	[[ "$device_index" =~ ^[0-9]+$ ]] ||
+		die "invalid null_blk device index: $device_index"
+	UNDERLYING="/dev/nullb$device_index"
+	deadline=$((SECONDS + 10))
 	while [ ! -b "$UNDERLYING" ]; do
 		[ "$SECONDS" -lt "$deadline" ] ||
 			die "$UNDERLYING did not appear"
