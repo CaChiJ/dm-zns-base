@@ -2,6 +2,7 @@
 # test directly, so a failing case shows up as a failing insmod.
 
 obj-m += allocator-test.o
+obj-m += gc-policy-test.o
 obj-m += memtable-test.o
 obj-m += sstable-test.o
 obj-m += super-test.o

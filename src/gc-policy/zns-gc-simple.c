@@ -10,6 +10,8 @@ static bool should_gc(const struct zns_gc_context *ctx)
 static int select_victim(const struct zns_gc_context *ctx)
 {
 	unsigned int zone;
+	int victim = -ENOSPC;
+	sector_t min_valid = 0;
 
 	for (zone = 0; zone < ctx->nr_zones; zone++) {
 		struct zns_gc_zone_info info = ctx->get_zone_info(ctx, zone);
@@ -17,10 +19,16 @@ static int select_victim(const struct zns_gc_context *ctx)
 		if (!info.is_reserve && info.resettable && !info.free_blocks &&
 		    info.valid_blocks < info.capacity_blocks &&
 		    info.valid_blocks <= ctx->reserve_free_blocks) {
-			return zone;
+			/* Minimize copying instead of repeatedly cleaning low IDs. */
+			if (victim < 0 || info.valid_blocks < min_valid) {
+				victim = zone;
+				min_valid = info.valid_blocks;
+				if (!min_valid)
+					break;
+			}
 		}
 	}
-	return -ENOSPC;
+	return victim;
 }
 
 const struct zns_gc_policy zns_gc_policy = {

@@ -293,6 +293,23 @@ calls `fail "<reason>"` to fail, and `detail "key=value"` to add one short
 field to its result line. `run.sh` picks the new
 file up automatically.
 
+## GC victim selection regression
+
+`unit/gc-policy` checks that the simple policy chooses the eligible zone with
+the fewest valid blocks, including zero-copy victims and deterministic ties.
+It also checks that reserve zones, zones with append space, non-resettable
+zones, and victims too large for the reserve are excluded.
+
+Run the policy regression and existing GC data-integrity tests on Linux:
+
+```bash
+sudo bash tests/run.sh gc-policy gc-failure m3
+```
+
+The policy still runs synchronously when ordinary write space is exhausted.
+Use `scripts/gc-benchmark.sh` with identical device and fio settings before
+and after the change to compare throughput, latency, `gc_moved`, and resets.
+
 ## Not covered
 
 Crash consistency, SSTable payload CRC
