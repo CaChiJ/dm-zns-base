@@ -1,8 +1,8 @@
 ZNS_ENGINE ?= lsm
 ZNS_GC_POLICY ?= simple
 
-ifeq ($(filter $(ZNS_GC_POLICY),none simple),)
-$(error ZNS_GC_POLICY must be none or simple)
+ifeq ($(filter $(ZNS_GC_POLICY),none simple greedy),)
+$(error ZNS_GC_POLICY must be none, simple, or greedy)
 endif
 
 obj-m += dm-zns-base.o
