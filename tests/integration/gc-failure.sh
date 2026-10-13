@@ -7,8 +7,10 @@ TARGET_NAME=${TARGET_NAME:-zns-gc-failure}
 # Used by the sourced test helpers.
 # shellcheck disable=SC2034
 ZNS_REQUIRED_ENGINE=lsm
+# Keep simple as the standalone default while allowing a full suite to exercise
+# the same failure boundaries with another GC policy.
 # shellcheck disable=SC2034
-ZNS_GC_POLICY=simple
+ZNS_GC_POLICY=${ZNS_GC_POLICY:-simple}
 TEST_DEVICE_NAME="nullb-gc-$$"
 UNDERLYING="/dev/$TEST_DEVICE_NAME"
 TEST_DEVICE_CONFIG="/sys/kernel/config/nullb/$TEST_DEVICE_NAME"
