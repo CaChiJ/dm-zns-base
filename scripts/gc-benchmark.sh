@@ -5,9 +5,9 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-OUT_DIR=${1:?usage: sudo bash scripts/gc-benchmark.sh OUTPUT_DIR [simple|none]}
+OUT_DIR=${1:?usage: sudo bash scripts/gc-benchmark.sh OUTPUT_DIR [simple|greedy|none]}
 POLICY=${2:-simple}
-case $POLICY in simple|none) ;; *) echo "policy must be simple or none" >&2; exit 2 ;; esac
+case $POLICY in simple|greedy|none) ;; *) echo "policy must be simple, greedy, or none" >&2; exit 2 ;; esac
 
 TARGET_NAME="zns-gc-bench-$$"
 # These settings are consumed by the sourced test helpers.

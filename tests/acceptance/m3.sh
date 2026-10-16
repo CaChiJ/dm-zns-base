@@ -10,6 +10,7 @@ TARGET_NAME=${TARGET_NAME:-zns-m3-acceptance}
 ZNS_REQUIRED_ENGINE=lsm
 TESTS_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 source "$TESTS_DIR/lib/init.sh"
+PRIMARY_GC_POLICY=$ZNS_GC_POLICY
 
 report_init "acceptance/m3"
 require_root
@@ -68,32 +69,32 @@ check_fio_read_success() {
 		"$output" >/dev/null || fail "fio readback was incomplete"
 }
 
-case_simple() {
-	fio_job simple-fill "$tmp_dir/simple-fill.json" --rw=write ||
-		fail "simple fill failed"
-	check_fio_success "$tmp_dir/simple-fill.json" "$range_bytes"
-	fio_job simple-overwrite "$tmp_dir/simple-overwrite.json" \
+case_gc_policy() {
+	fio_job "$PRIMARY_GC_POLICY-fill" "$tmp_dir/gc-fill.json" --rw=write ||
+		fail "$PRIMARY_GC_POLICY fill failed"
+	check_fio_success "$tmp_dir/gc-fill.json" "$range_bytes"
+	fio_job "$PRIMARY_GC_POLICY-overwrite" "$tmp_dir/gc-overwrite.json" \
 		--rw=randwrite --io_size="$overwrite_bytes" \
 		--norandommap=1 --randrepeat=1 --randseed=314159 ||
-		fail "simple overwrite or latest-data verification failed"
-	check_fio_success "$tmp_dir/simple-overwrite.json" "$overwrite_bytes"
-	fio_job simple-readback "$tmp_dir/simple-readback.json" --rw=read --verify_only=1 ||
-		fail "simple readback failed"
-	check_fio_read_success "$tmp_dir/simple-readback.json"
+		fail "$PRIMARY_GC_POLICY overwrite or latest-data verification failed"
+	check_fio_success "$tmp_dir/gc-overwrite.json" "$overwrite_bytes"
+	fio_job "$PRIMARY_GC_POLICY-readback" "$tmp_dir/gc-readback.json" --rw=read --verify_only=1 ||
+		fail "$PRIMARY_GC_POLICY readback failed"
+	check_fio_read_success "$tmp_dir/gc-readback.json"
 	[ "$(status_field gc_moved)" -gt 0 ] || fail "GC moved no valid data"
 	[ "$(status_field zone_resets)" -gt 0 ] || fail "GC reset no data zone"
 	[ "$(status_field valid_blocks)" -eq "$((range_bytes / 4096))" ] ||
 		fail "live block count changed during GC"
-	detail "policy=simple capacity=$capacity_bytes range=$range_bytes overwrite=$overwrite_bytes moved=$(status_field gc_moved) resets=$(status_field zone_resets)"
+	detail "policy=$PRIMARY_GC_POLICY capacity=$capacity_bytes range=$range_bytes overwrite=$overwrite_bytes moved=$(status_field gc_moved) resets=$(status_field zone_resets)"
 	detach_dm_target
 	# shellcheck disable=SC2034
 	ZNS_TARGET_CREATED=0
 	create_dm_target
 	# Every block in the range carries a fio CRC header. Re-read after the
 	# normal detach/reattach to exercise reconstructed GC validity state.
-	fio_job simple-restart-read "$tmp_dir/simple-restart-read.json" \
+	fio_job "$PRIMARY_GC_POLICY-restart-read" "$tmp_dir/gc-restart-read.json" \
 		--rw=read --verify_only=1 || fail "readback after restart failed"
-	check_fio_read_success "$tmp_dir/simple-restart-read.json"
+	check_fio_read_success "$tmp_dir/gc-restart-read.json"
 	[ "$(status_field valid_blocks)" -eq "$((range_bytes / 4096))" ] ||
 		fail "validity map was not restored"
 }
@@ -118,8 +119,8 @@ case_none() {
 	detail "policy=none error=ENOSPC capacity=$capacity_bytes"
 }
 
-prepare_policy simple
-run_case "simple GC completes 0.8C fill plus 1.2C random overwrite, verifies data, moves blocks and resets zones" case_simple
+prepare_policy "$PRIMARY_GC_POLICY"
+run_case "$PRIMARY_GC_POLICY GC completes 0.8C fill plus 1.2C random overwrite, verifies data, moves blocks and resets zones" case_gc_policy
 [ "$ZNS_FAILED" -eq 0 ] || { report_summary; exit 1; }
 detach_dm_target
 unload_module
