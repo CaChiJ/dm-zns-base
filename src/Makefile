@@ -1,5 +1,5 @@
 ZNS_ENGINE ?= lsm
-ZNS_GC_POLICY ?= simple
+ZNS_GC_POLICY ?= greedy
 
 ifeq ($(filter $(ZNS_GC_POLICY),none simple greedy),)
 $(error ZNS_GC_POLICY must be none, simple, or greedy)
